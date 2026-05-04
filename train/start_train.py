@@ -314,38 +314,49 @@ def build_job_request(args: argparse.Namespace) -> Any:
 
 
 def submit_job(client: DLCClient, args: argparse.Namespace) -> str:
-    request = build_job_request(args)
-    if args.dry_run:
-        print_json(request)
-        return ""
-    log("submitting PAI DLC training job")
-    response = client.create_job(request)
-    print_json(response.body)
-    job_id = getattr(response.body, "job_id", None)
+    body = create_job(client, args)
+    print_json(body)
+    job_id = getattr(body, "job_id", None)
     if not job_id:
         raise SystemExit("CreateJob did not return a job_id")
     return job_id
 
 
-def get_job(client: DLCClient, job_id: str, need_detail: bool = False) -> Any:
+def create_job(client: DLCClient, args: argparse.Namespace) -> Any:
+    request = build_job_request(args)
+    if args.dry_run:
+        print_json(request)
+        return None
+    log("submitting PAI DLC training job")
+    response = client.create_job(request)
+    return response.body
+
+
+def build_status_payload(body: Any) -> dict[str, Any]:
+    return {
+        "job_id": body.job_id,
+        "display_name": body.display_name,
+        "status": body.status,
+        "sub_status": body.sub_status,
+        "reason_code": body.reason_code,
+        "reason_message": body.reason_message,
+        "workspace_id": body.workspace_id,
+        "resource_id": body.resource_id,
+        "user_command": body.user_command,
+    }
+
+
+def fetch_job_body(client: DLCClient, job_id: str, need_detail: bool = False) -> Any:
     response = client.get_job(job_id, dlc_models.GetJobRequest(need_detail=need_detail))
-    body = response.body
+    return response.body
+
+
+def get_job(client: DLCClient, job_id: str, need_detail: bool = False) -> Any:
+    body = fetch_job_body(client, job_id, need_detail=need_detail)
     if need_detail:
         print_json(body)
     else:
-        print_json(
-            {
-                "job_id": body.job_id,
-                "display_name": body.display_name,
-                "status": body.status,
-                "sub_status": body.sub_status,
-                "reason_code": body.reason_code,
-                "reason_message": body.reason_message,
-                "workspace_id": body.workspace_id,
-                "resource_id": body.resource_id,
-                "user_command": body.user_command,
-            }
-        )
+        print_json(build_status_payload(body))
     return body
 
 
