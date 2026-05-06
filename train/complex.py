@@ -30,8 +30,8 @@ POLL_INTERVAL = 5
 
 
 DEFAULT_DATA_SOURCES = [
-    CreateJobRequestDataSources(data_source_id="d-jp359y1kyfksonvlvx", mount_path="/mnt/data/"),
-    CreateJobRequestDataSources(data_source_id="d-r696y5jblhz39llv99", mount_path="/mnt/oss/"),
+    CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
+    # CreateJobRequestDataSources(data_source_id="d-r696y5jblhz39llv99", mount_path="/mnt/oss/"),
 ]
 
 def require_env(name: str) -> str:
