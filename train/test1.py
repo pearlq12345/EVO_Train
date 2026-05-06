@@ -1,6 +1,4 @@
 from alibabacloud_pai_dlc20201203.client import Client
-from alibabacloud_credentials.client import Client as CredClient
-from alibabacloud_tea_openapi.models import Config
 from alibabacloud_pai_dlc20201203.models import (
     CreateJobRequest,
     JobSpec,
@@ -8,16 +6,11 @@ from alibabacloud_pai_dlc20201203.models import (
 )
 import time  # 用于轮询等待
 
+from aliyun_dlc_client import create_dlc_client
+
 # 初始化客户端
 region = 'cn-hangzhou'
-cred = CredClient()
-client = Client(
-    config=Config(
-        credential=cred,
-        region_id=region,
-        endpoint=f'pai-dlc.{region}.aliyuncs.com',
-    )
-)
+client = create_dlc_client(region)
 # 任务资源配置
 spec = JobSpec(
     type='Worker',
