@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Submit a heavier Alibaba Cloud PAI DLC training job.
+"""Submit a PAI DLC job that reproduces the dataset mount scheduling issue.
 
-This script intentionally reads credentials and uncertain resource identifiers
-from environment variables or command-line flags instead of hardcoding them.
+The known-bad case is: private image + DataSourceId mount + 16 CPU / 1 GPU /
+60Gi memory. Similar jobs without the DataSourceId mount schedule normally.
 """
 
 from __future__ import annotations
@@ -27,18 +27,20 @@ from alibabacloud_tea_openapi.models import Config
 DEFAULT_REGION = "cn-hangzhou"
 DEFAULT_WORKSPACE_ID = "604723"
 DEFAULT_RESOURCE_ID = "quota8xa9l64xn9c"
-DEFAULT_JOB_NAME = "evo-lerobot-complex"
+DEFAULT_JOB_NAME = "evo-dataset-mount-repro"
 DEFAULT_JOB_TYPE = "PyTorchJob"
 DEFAULT_ROLE = "Worker"
-DEFAULT_CPU = "10"
+DEFAULT_IMAGE = "evo-train-mirror-registry.cn-hangzhou.cr.aliyuncs.com/evo-mirror-namespace/evo-mirror:v1"
+DEFAULT_CPU = "16"
 DEFAULT_GPU = "1"
-DEFAULT_MEMORY = "50Gi"
+DEFAULT_MEMORY = "60Gi"
+DEFAULT_DATASET_ID = "d-y5ycxjqjan7egt12oa"
 DEFAULT_DATASET_MOUNT_PATH = "/root/data"
 DEFAULT_DATASET_MOUNT_ACCESS = "RW"
 DEFAULT_CODE_MOUNT_PATH = "/root/code"
 TERMINAL_STATUSES = {"Stopped", "Succeeded", "Failed"}
 
-TRAIN_COMMAND = """lerobot-train \\
+LEROBOT_COMMAND = """lerobot-train \\
   --dataset.repo_id=local/libero_10_no_noops_1.0.0_lerobot \\
   --dataset.root=/root/data/libero_10_no_noops_1.0.0_lerobot \\
   --dataset.video_backend=pyav \\
@@ -48,6 +50,7 @@ TRAIN_COMMAND = """lerobot-train \\
   --output_dir=/root/data/checkpoint \\
   --steps=1000 \\
   --policy.device=cuda"""
+DEFAULT_COMMAND = "nvcc -V"
 
 
 def require_env(name: str) -> str:
@@ -123,7 +126,7 @@ def build_request(args: argparse.Namespace) -> CreateJobRequest:
         job_specs=[job_spec],
         code_source=make_code_source(args),
         data_sources=make_data_sources(args),
-        user_command=TRAIN_COMMAND,
+        user_command=args.command,
         envs={
             "DATASET_ROOT": "/root/data/libero_10_no_noops_1.0.0_lerobot",
             "OUTPUT_DIR": "/root/data/checkpoint",
@@ -154,7 +157,7 @@ def wait_job(client: Client, job_id: str, interval: int) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Submit a complex PAI DLC lerobot training job.")
+    parser = argparse.ArgumentParser(description="Submit a PAI DLC dataset mount repro job.")
     parser.add_argument("--region", default=os.environ.get("ALIYUN_REGION", DEFAULT_REGION))
     parser.add_argument("--workspace-id", default=os.environ.get("PAI_WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
     parser.add_argument("--resource-id", default=os.environ.get("PAI_RESOURCE_ID", DEFAULT_RESOURCE_ID))
@@ -162,15 +165,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--job-type", default=os.environ.get("PAI_DLC_JOB_TYPE", DEFAULT_JOB_TYPE))
     parser.add_argument(
         "--image",
-        default=os.environ.get("PAI_DLC_IMAGE"),
-        required=os.environ.get("PAI_DLC_IMAGE") is None,
+        default=os.environ.get("PAI_DLC_IMAGE", DEFAULT_IMAGE),
     )
     parser.add_argument("--ecs-spec", default=os.environ.get("PAI_ECS_SPEC"))
     parser.add_argument("--cpu", default=os.environ.get("PAI_DLC_CPU", DEFAULT_CPU))
     parser.add_argument("--gpu", default=os.environ.get("PAI_DLC_GPU", DEFAULT_GPU))
     parser.add_argument("--gpu-type", default=os.environ.get("PAI_DLC_GPU_TYPE"))
     parser.add_argument("--memory", default=os.environ.get("PAI_DLC_MEMORY", DEFAULT_MEMORY))
-    parser.add_argument("--dataset-id", default=os.environ.get("PAI_DLC_DATASET_ID"))
+    parser.add_argument("--dataset-id", default=os.environ.get("PAI_DLC_DATASET_ID", DEFAULT_DATASET_ID))
     parser.add_argument("--dataset-uri", default=os.environ.get("PAI_DLC_DATASET_URI"))
     parser.add_argument(
         "--dataset-mount-path",
@@ -184,6 +186,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--code-branch", default=os.environ.get("PAI_DLC_CODE_BRANCH"))
     parser.add_argument("--code-commit", default=os.environ.get("PAI_DLC_CODE_COMMIT"))
     parser.add_argument("--code-mount-path", default=os.environ.get("PAI_DLC_CODE_MOUNT_PATH", DEFAULT_CODE_MOUNT_PATH))
+    parser.add_argument("--command", default=os.environ.get("PAI_DLC_COMMAND", DEFAULT_COMMAND))
+    parser.add_argument("--lerobot-command", action="store_const", dest="command", const=LEROBOT_COMMAND)
     parser.add_argument("--interval", type=int, default=5)
     parser.add_argument("--no-wait", action="store_true", help="Only create the job and print its ID.")
     return parser.parse_args()
