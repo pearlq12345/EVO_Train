@@ -1,16 +1,24 @@
+import os
+import time  # 用于轮询等待
+
 from alibabacloud_pai_dlc20201203.client import Client
 from alibabacloud_pai_dlc20201203.models import (
     CreateJobRequest,
     JobSpec,
     ResourceConfig, GetJobRequest
 )
-import time  # 用于轮询等待
-
-from aliyun_dlc_client import create_dlc_client
+from alibabacloud_tea_openapi.models import Config
 
 # 初始化客户端
 region = 'cn-hangzhou'
-client = create_dlc_client(region)
+client = Client(
+    config=Config(
+        access_key_id=os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
+        access_key_secret=os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
+        region_id=region,
+        endpoint=f'pai-dlc.{region}.aliyuncs.com',
+    )
+)
 # 任务资源配置
 spec = JobSpec(
     type='Worker',
