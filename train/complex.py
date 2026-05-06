@@ -3,9 +3,8 @@
 from __future__ import annotations
 import os
 import time
-from typing import Optional
 from alibabacloud_pai_dlc20201203.client import Client
-from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestUserVpc, GetJobRequest, JobSpec, ResourceConfig
+from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, JobSpec, ResourceConfig
 from alibabacloud_tea_openapi.models import Config
 
 DEFAULT_REGION = "cn-hangzhou"
@@ -30,41 +29,9 @@ DEFAULT_COMMAND = "sleep 3000"
 POLL_INTERVAL = 5
 
 
-class DataSourceSpec:
-    def __init__(
-        self,
-        data_source_id: str | None = None,
-        data_source_version: str | None = None,
-        mount_path: str | None = None,
-        uri: str | None = None,
-        mount_access: str | None = None,
-    ):
-        self.data_source_id = data_source_id
-        self.data_source_version = data_source_version
-        self.mount_path = mount_path
-        self.uri = uri
-        self.mount_access = mount_access
-
-    def validate(self) -> None:
-        return None
-
-    def to_map(self) -> dict[str, str]:
-        result: dict[str, str] = {}
-        if self.data_source_id:
-            result["DataSourceId"] = self.data_source_id
-        if self.data_source_version:
-            result["DataSourceVersion"] = self.data_source_version
-        if self.mount_path:
-            result["MountPath"] = self.mount_path
-        if self.uri:
-            result["Uri"] = self.uri
-        if self.mount_access:
-            result["MountAccess"] = self.mount_access
-        return result
-
 DEFAULT_DATA_SOURCES = [
-    DataSourceSpec(data_source_id="d-jp359y1kyfksonvlvx", data_source_version="v1", mount_path="/mnt/data/"),
-    DataSourceSpec(data_source_id="d-r696y5jblhz39llv99", data_source_version="v1", mount_path="/mnt/oss/"),
+    CreateJobRequestDataSources(data_source_id="d-jp359y1kyfksonvlvx", mount_path="/mnt/data/"),
+    CreateJobRequestDataSources(data_source_id="d-r696y5jblhz39llv99", mount_path="/mnt/oss/"),
 ]
 
 def require_env(name: str) -> str:
