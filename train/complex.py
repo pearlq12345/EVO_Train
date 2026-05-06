@@ -73,14 +73,15 @@ def make_data_sources(args: argparse.Namespace) -> List[Any]:
     if not args.dataset_uri and not args.dataset_id:
         return []
 
-    return [
-        CreateJobRequestDataSources(
-            data_source_id=args.dataset_id,
-            uri=args.dataset_uri,
-            mount_path=args.dataset_mount_path,
-            mount_access=args.dataset_mount_access,
-        )
-    ]
+    data_source = CreateJobRequestDataSources(
+        data_source_id=args.dataset_id,
+        uri=args.dataset_uri,
+        mount_path=args.dataset_mount_path,
+    )
+    if hasattr(data_source, "mount_access"):
+        data_source.mount_access = args.dataset_mount_access
+
+    return [data_source]
 
 
 def make_code_source(args: argparse.Namespace) -> Optional[CreateJobRequestCodeSource]:
