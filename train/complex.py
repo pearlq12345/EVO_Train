@@ -96,13 +96,15 @@ def make_code_source(args: argparse.Namespace) -> Optional[CreateJobRequestCodeS
 
 
 def build_request(args: argparse.Namespace) -> CreateJobRequest:
-    resource_config = ResourceConfig(
-        cpu=args.cpu,
-        gpu=args.gpu,
-        memory=args.memory,
-    )
-    if args.gpu_type:
-        resource_config.gputype = args.gpu_type
+    resource_config = None
+    if not args.ecs_spec:
+        resource_config = ResourceConfig(
+            cpu=args.cpu,
+            gpu=args.gpu,
+            memory=args.memory,
+        )
+        if args.gpu_type:
+            resource_config.gputype = args.gpu_type
 
     job_spec = JobSpec(
         type=DEFAULT_ROLE,
