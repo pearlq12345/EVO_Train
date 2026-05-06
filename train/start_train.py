@@ -100,17 +100,23 @@ Parameter notes:
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import shlex
+from pathlib import Path
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
-DLCClient: Any = None
-dlc_models: Any = None
-openapi_models: Any = None
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from train.platform.aliyun_dlc import (
+    AliyunDLCPlatform,
+    DONE_STATUSES,
+    FAILED_STATUSES,
+    create_client as create_dlc_client,
+    fetch_job_body,
+    print_job_body,
+)
 
 
 DEFAULT_ENV_FILES = [
@@ -118,13 +124,6 @@ DEFAULT_ENV_FILES = [
     Path.home() / "EVO_Train" / ".env",
     Path("/home/evomind/evo-data_backend/.env"),
 ]
-
-DONE_STATUSES = {"Succeeded", "Succeed", "SUCCESS", "SUCCEEDED"}
-FAILED_STATUSES = {"Failed", "FAILED", "Stopped", "STOPPED", "Deleted", "DELETED"}
-DEFAULT_JOB_TYPE = "PyTorch"
-DEFAULT_JOB_ROLE = "Worker"
-DEFAULT_ACCESSIBILITY = "PRIVATE"
-DEFAULT_POD_COUNT = 1
 
 
 def log(message: str) -> None:
@@ -151,205 +150,22 @@ def load_env(extra_env: str | None) -> None:
         load_dotenv_file(Path(extra_env).expanduser())
 
 
-def first_value(*values: str | None) -> str | None:
-    for value in values:
-        if value:
-            return value
-    return None
-
-
-def env_first(*names: str) -> str | None:
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return None
-
-
-def require_value(value: str | None, name: str) -> str:
-    if not value:
-        raise SystemExit(f"Missing required value: {name}")
-    return value
-
-
-def load_dlc_sdk() -> None:
-    global DLCClient, dlc_models, openapi_models
-    if DLCClient and dlc_models and openapi_models:
-        return
-    try:
-        from alibabacloud_pai_dlc20201203.client import Client
-        from alibabacloud_pai_dlc20201203 import models
-        from alibabacloud_tea_openapi import models as tea_openapi_models
-    except ImportError as exc:
-        print(
-            "Missing Alibaba Cloud SDK dependencies. Install them with:\n"
-            "  python3 -m pip install --user "
-            "alibabacloud_pai-dlc20201203 alibabacloud_tea_openapi python-dotenv",
-            file=sys.stderr,
-        )
-        raise SystemExit(2) from exc
-
-    DLCClient = Client
-    dlc_models = models
-    openapi_models = tea_openapi_models
-
-
 def create_client(region_id: str) -> Any:
-    load_dlc_sdk()
-    access_key_id = require_value(
-        env_first("ALIBABA_CLOUD_ACCESS_KEY_ID", "ALIBABACLOUD_ACCESS_KEY_ID", "OSS_ACCESS_KEY_ID"),
-        "ALIBABA_CLOUD_ACCESS_KEY_ID or OSS_ACCESS_KEY_ID",
-    )
-    access_key_secret = require_value(
-        env_first("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "ALIBABACLOUD_ACCESS_KEY_SECRET", "OSS_ACCESS_KEY_SECRET"),
-        "ALIBABA_CLOUD_ACCESS_KEY_SECRET or OSS_ACCESS_KEY_SECRET",
-    )
-    endpoint = os.environ.get("PAI_DLC_ENDPOINT", f"pai-dlc.{region_id}.aliyuncs.com")
-    config = openapi_models.Config(
-        access_key_id=access_key_id,
-        access_key_secret=access_key_secret,
-        region_id=region_id,
-        endpoint=endpoint,
-    )
-    return DLCClient(config)
+    return create_dlc_client(region_id)
 
 
-def to_plain(value: Any) -> Any:
-    if hasattr(value, "to_map"):
-        return value.to_map()
-    if isinstance(value, list):
-        return [to_plain(item) for item in value]
-    if isinstance(value, dict):
-        return {key: to_plain(item) for key, item in value.items()}
-    return value
+def submit_job(client: Any, args: argparse.Namespace) -> str:
+    platform = AliyunDLCPlatform(region_id=args.region, client=client)
+    return platform.submit(vars(args))
 
 
-def print_json(value: Any) -> None:
-    print(json.dumps(to_plain(value), ensure_ascii=False, indent=2, sort_keys=True))
-
-
-def build_train_command(args: argparse.Namespace) -> str:
-    if args.command:
-        return args.command
-
-    template = first_value(
-        args.command_template,
-        os.environ.get("DLC_TRAIN_COMMAND_TEMPLATE"),
-        "python train.py --dataset-path {dataset_path} --epochs {epochs} "
-        "--checkpoint-path {checkpoint_path} --checkpoint-frequency {checkpoint_frequency}",
-    )
-    values = {
-        "dataset_path": shlex.quote(args.dataset_path),
-        "epochs": args.epochs,
-        "checkpoint_path": shlex.quote(args.checkpoint_path),
-        "checkpoint_frequency": args.checkpoint_frequency,
-        "gpu_count": args.gpu_count,
-    }
-    return template.format(**values)
-
-
-def make_data_sources(args: argparse.Namespace) -> list[Any]:
-    data_sources: list[Any] = []
-    for spec in args.mount or []:
-        # Format: URI=MOUNT_PATH[:RO|RW]
-        try:
-            uri, rest = spec.split("=", 1)
-        except ValueError as exc:
-            raise SystemExit(f"Invalid --mount value: {spec}. Expected URI=MOUNT_PATH[:RO|RW]") from exc
-        mount_path = rest
-        mount_access = "RW"
-        if rest.endswith(":RO") or rest.endswith(":RW"):
-            mount_path, mount_access = rest.rsplit(":", 1)
-        data_sources.append(
-            dlc_models.CreateJobRequestDataSources(
-                uri=uri,
-                mount_path=mount_path,
-                mount_access=mount_access,
-            )
-        )
-    return data_sources
-
-
-def build_job_request(args: argparse.Namespace) -> Any:
-    workspace_id = require_value(first_value(args.workspace_id, os.environ.get("PAI_WORKSPACE_ID")), "--workspace-id or PAI_WORKSPACE_ID")
-    image = require_value(first_value(args.image, os.environ.get("PAI_DLC_IMAGE")), "--image or PAI_DLC_IMAGE")
-    ecs_spec = require_value(first_value(args.ecs_spec, os.environ.get("PAI_ECS_SPEC")), "--ecs-spec or PAI_ECS_SPEC")
-    resource_id = first_value(args.resource_id, os.environ.get("PAI_RESOURCE_ID"))
-
-    resource_config = dlc_models.ResourceConfig(
-        gpu=args.gpu_count,
-        cpu=args.cpu,
-        memory=args.memory,
-    )
-    if args.gpu_type:
-        resource_config.gputype = args.gpu_type
-
-    job_spec = dlc_models.JobSpec(
-        type=DEFAULT_JOB_ROLE,
-        image=image,
-        pod_count=DEFAULT_POD_COUNT,
-        ecs_spec=ecs_spec,
-        resource_config=resource_config,
-    )
-
-    return dlc_models.CreateJobRequest(
-        display_name=args.job_name,
-        workspace_id=workspace_id,
-        resource_id=resource_id,
-        job_type=DEFAULT_JOB_TYPE,
-        job_specs=[job_spec],
-        data_sources=make_data_sources(args),
-        user_command=build_train_command(args),
-        accessibility=DEFAULT_ACCESSIBILITY,
-        job_max_running_time_minutes=args.max_running_minutes,
-        description=args.description,
-        envs={
-            "DATASET_PATH": args.dataset_path,
-            "EPOCHS": str(args.epochs),
-            "CHECKPOINT_PATH": args.checkpoint_path,
-            "CHECKPOINT_FREQUENCY": str(args.checkpoint_frequency),
-            "GPU_COUNT": str(args.gpu_count),
-        },
-    )
-
-
-def submit_job(client: DLCClient, args: argparse.Namespace) -> str:
-    request = build_job_request(args)
-    if args.dry_run:
-        print_json(request)
-        return ""
-    log("submitting PAI DLC training job")
-    response = client.create_job(request)
-    print_json(response.body)
-    job_id = getattr(response.body, "job_id", None)
-    if not job_id:
-        raise SystemExit("CreateJob did not return a job_id")
-    return job_id
-
-
-def get_job(client: DLCClient, job_id: str, need_detail: bool = False) -> Any:
-    response = client.get_job(job_id, dlc_models.GetJobRequest(need_detail=need_detail))
-    body = response.body
-    if need_detail:
-        print_json(body)
-    else:
-        print_json(
-            {
-                "job_id": body.job_id,
-                "display_name": body.display_name,
-                "status": body.status,
-                "sub_status": body.sub_status,
-                "reason_code": body.reason_code,
-                "reason_message": body.reason_message,
-                "workspace_id": body.workspace_id,
-                "resource_id": body.resource_id,
-                "user_command": body.user_command,
-            }
-        )
+def get_job(client: Any, job_id: str, need_detail: bool = False) -> Any:
+    body = fetch_job_body(client, job_id, need_detail=need_detail)
+    print_job_body(body, need_detail=need_detail)
     return body
 
 
-def wait_job(client: DLCClient, job_id: str, timeout: int, interval: int) -> None:
+def wait_job(client: Any, job_id: str, timeout: int, interval: int) -> None:
     deadline = time.time() + timeout
     while True:
         body = get_job(client, job_id, need_detail=False)
@@ -364,9 +180,9 @@ def wait_job(client: DLCClient, job_id: str, timeout: int, interval: int) -> Non
         time.sleep(interval)
 
 
-def stop_job(client: DLCClient, job_id: str) -> None:
-    response = client.stop_job(job_id, dlc_models.StopJobRequest())
-    print_json(response.body)
+def stop_job(client: Any, job_id: str) -> None:
+    platform = AliyunDLCPlatform(client=client)
+    platform.stop(job_id)
 
 
 def parse_args() -> argparse.Namespace:
