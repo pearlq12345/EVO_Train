@@ -32,7 +32,6 @@ DEFAULT_JOB_TYPE = "PyTorchJob"
 DEFAULT_ROLE = "Worker"
 DEFAULT_CPU = "10"
 DEFAULT_GPU = "1"
-DEFAULT_GPU_TYPE = "A10"
 DEFAULT_MEMORY = "50Gi"
 DEFAULT_DATASET_MOUNT_PATH = "/root/data"
 DEFAULT_DATASET_MOUNT_ACCESS = "RW"
@@ -102,7 +101,8 @@ def build_request(args: argparse.Namespace) -> CreateJobRequest:
         gpu=args.gpu,
         memory=args.memory,
     )
-    resource_config.gputype = args.gpu_type
+    if args.gpu_type:
+        resource_config.gputype = args.gpu_type
 
     job_spec = JobSpec(
         type=DEFAULT_ROLE,
@@ -166,7 +166,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ecs-spec", default=os.environ.get("PAI_ECS_SPEC"))
     parser.add_argument("--cpu", default=os.environ.get("PAI_DLC_CPU", DEFAULT_CPU))
     parser.add_argument("--gpu", default=os.environ.get("PAI_DLC_GPU", DEFAULT_GPU))
-    parser.add_argument("--gpu-type", default=os.environ.get("PAI_DLC_GPU_TYPE", DEFAULT_GPU_TYPE))
+    parser.add_argument("--gpu-type", default=os.environ.get("PAI_DLC_GPU_TYPE"))
     parser.add_argument("--memory", default=os.environ.get("PAI_DLC_MEMORY", DEFAULT_MEMORY))
     parser.add_argument("--dataset-id", default=os.environ.get("PAI_DLC_DATASET_ID"))
     parser.add_argument("--dataset-uri", default=os.environ.get("PAI_DLC_DATASET_URI"))
