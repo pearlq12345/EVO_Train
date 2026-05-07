@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit and manage Alibaba Cloud PAI DLC training jobs.
+"""Submit and manage training jobs across supported platforms.
 
 Typical usage:
   python3 start_train.py submit \
@@ -9,11 +9,16 @@ Typical usage:
     --checkpoint-frequency 1 \
     --gpu-count 1
 
-Required PAI settings can be passed as flags or environment variables:
+Required backend settings can be passed as flags or environment variables.
+For Aliyun DLC:
   PAI_WORKSPACE_ID, PAI_DLC_IMAGE, PAI_RESOURCE_ID, PAI_ECS_SPEC
+For AutoDL:
+  AUTODL_HOST, AUTODL_PORT, AUTODL_USER, AUTODL_KEY_PATH, AUTODL_WORKDIR
 
 Parameter notes:
   Global arguments:
+    --platform
+      Training backend name. Defaults to TRAIN_PLATFORM, then aliyun.
     --region
       Alibaba Cloud region used by the DLC API. Defaults to ALIYUN_REGION,
       then cn-hangzhou.
@@ -42,6 +47,8 @@ Parameter notes:
       {dataset_path}, {epochs}, {checkpoint_path}, {checkpoint_frequency}, and
       {gpu_count}. Defaults to DLC_TRAIN_COMMAND_TEMPLATE, then the built-in
       train.py command.
+    --workdir
+      Optional working directory used by SSH-based backends such as AutoDL.
 
   submit PAI DLC job arguments:
     --job-name
@@ -100,6 +107,7 @@ Parameter notes:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -117,6 +125,8 @@ from train.platform.aliyun_dlc import (
     fetch_job_body,
     print_job_body,
 )
+from train.platform.base import TrainPlatform
+from train.platform.factory import get_platform
 
 
 DEFAULT_ENV_FILES = [
@@ -154,22 +164,43 @@ def create_client(region_id: str) -> Any:
     return create_dlc_client(region_id)
 
 
-def submit_job(client: Any, args: argparse.Namespace) -> str:
-    platform = AliyunDLCPlatform(region_id=args.region, client=client)
+def resolve_platform(args: argparse.Namespace) -> TrainPlatform:
+    platform_name = (args.platform or "").strip().lower() or None
+    return get_platform(platform_name, region_id=args.region)
+
+
+def submit_job(args: argparse.Namespace, platform: TrainPlatform | None = None) -> str:
+    platform = platform or resolve_platform(args)
     return platform.submit(vars(args))
 
 
-def get_job(client: Any, job_id: str, need_detail: bool = False) -> Any:
-    body = fetch_job_body(client, job_id, need_detail=need_detail)
-    print_job_body(body, need_detail=need_detail)
-    return body
+def get_job(args: argparse.Namespace, platform: TrainPlatform | None = None) -> Any:
+    platform = platform or resolve_platform(args)
+    if isinstance(platform, AliyunDLCPlatform):
+        body = platform.fetch_job_body(args.job_id, need_detail=args.detail)
+        print_job_body(body, need_detail=args.detail)
+        return body
+
+    metadata = platform.metadata(args.job_id)
+    payload = {
+        "job_id": args.job_id,
+        "platform": (args.platform or "aliyun").strip().lower(),
+        **metadata,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return payload
 
 
-def wait_job(client: Any, job_id: str, timeout: int, interval: int) -> None:
+def wait_job(platform: TrainPlatform, job_id: str, timeout: int, interval: int) -> None:
     deadline = time.time() + timeout
     while True:
-        body = get_job(client, job_id, need_detail=False)
-        status = getattr(body, "status", None)
+        if isinstance(platform, AliyunDLCPlatform):
+            body = platform.fetch_job_body(job_id, need_detail=False)
+            print_job_body(body, need_detail=False)
+            status = getattr(body, "status", None)
+        else:
+            status = platform.status(job_id)
+            log(f"job status: {status}")
         if status in DONE_STATUSES:
             log(f"job finished successfully: {status}")
             return
@@ -180,19 +211,24 @@ def wait_job(client: Any, job_id: str, timeout: int, interval: int) -> None:
         time.sleep(interval)
 
 
-def stop_job(client: Any, job_id: str) -> None:
-    platform = AliyunDLCPlatform(client=client)
-    platform.stop(job_id)
+def stop_job(args: argparse.Namespace, platform: TrainPlatform | None = None) -> None:
+    platform = platform or resolve_platform(args)
+    platform.stop(args.job_id)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Submit PAI DLC training jobs from ECS.")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Submit training jobs through the selected backend.")
 
+    parser.add_argument(
+        "--platform",
+        default=os.getenv("TRAIN_PLATFORM", "aliyun"),
+        help="Training backend name. Defaults to TRAIN_PLATFORM, then aliyun",
+    )
     parser.add_argument("--region", default=os.getenv("ALIYUN_REGION", "cn-hangzhou"))
-    parser.add_argument("--env-file", help="Optional .env file with Alibaba Cloud credentials and PAI defaults")
+    parser.add_argument("--env-file", help="Optional .env file with backend credentials and training defaults")
     sub = parser.add_subparsers(dest="command_name", required=True)
 
-    submit = sub.add_parser("submit", help="Create a PAI DLC training job")
+    submit = sub.add_parser("submit", help="Create a training job")
 
     train_args = submit.add_argument_group("training arguments")
     train_args.add_argument("--dataset-path", required=True, help="Path visible inside DLC container, for example /mnt/nas/dataset")
@@ -201,6 +237,7 @@ def parse_args() -> argparse.Namespace:
     train_args.add_argument("--checkpoint-frequency", required=True, type=int)
     train_args.add_argument("--command", help="Full training command. Overrides command template")
     train_args.add_argument("--command-template", help="Template using {dataset_path}, {epochs}, {checkpoint_path}, {checkpoint_frequency}, {gpu_count}")
+    train_args.add_argument("--workdir", help="Working directory for SSH-based backends such as AutoDL")
 
     pai_args = submit.add_argument_group("PAI DLC job arguments")
     pai_args.add_argument("--job-name", default="evo-train")
@@ -226,29 +263,29 @@ def parse_args() -> argparse.Namespace:
     execution_args.add_argument("--interval", type=int, default=30)
     execution_args.add_argument("--dry-run", action="store_true", help="Print CreateJob request without submitting")
 
-    status = sub.add_parser("status", help="Show DLC job status")
+    status = sub.add_parser("status", help="Show job status")
     status.add_argument("--job-id", required=True)
     status.add_argument("--detail", action="store_true")
 
-    stop = sub.add_parser("stop", help="Stop a DLC job")
+    stop = sub.add_parser("stop", help="Stop a job")
     stop.add_argument("--job-id", required=True)
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
     args = parse_args()
     load_env(args.env_file)
-    client = create_client(args.region)
 
     if args.command_name == "submit":
-        job_id = submit_job(client, args)
+        platform = resolve_platform(args)
+        job_id = submit_job(args, platform)
         if job_id and args.wait:
-            wait_job(client, job_id, args.timeout, args.interval)
+            wait_job(platform, job_id, args.timeout, args.interval)
     elif args.command_name == "status":
-        get_job(client, args.job_id, args.detail)
+        get_job(args)
     elif args.command_name == "stop":
-        stop_job(client, args.job_id)
+        stop_job(args)
     else:
         raise SystemExit(f"unknown command: {args.command_name}")
 

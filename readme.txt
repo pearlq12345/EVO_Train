@@ -43,3 +43,12 @@ database：
 
       # 兼容 evo-data_backend 的配置命名，也可以使用：
       export DATABASE_URL='mysql+pymysql://user:password@rm-xxxx.mysql.rds.aliyuncs.com:3306/evo_train?charset=utf8mb4'
+
+cli：
+      # 默认使用 TRAIN_PLATFORM，未设置时走 aliyun
+      python3 train/start_train.py --platform aliyun submit --dataset-path /mnt/nas/dataset --epochs 10 --checkpoint-path /mnt/nas/checkpoints/run-001 --checkpoint-frequency 1 --gpu-count 1
+
+      # AutoDL 通过 SSH 提交任务
+      export AUTODL_HOST='example.autodl'
+      export AUTODL_KEY_PATH='~/.ssh/id_ed25519'
+      python3 train/start_train.py --platform autodl submit --dataset-path /root/data --epochs 10 --checkpoint-path /root/checkpoints/run-001 --checkpoint-frequency 1 --gpu-count 1 --workdir /root/EVO_Train
