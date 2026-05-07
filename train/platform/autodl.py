@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 import os
 import shlex
@@ -34,6 +34,22 @@ class AutoDLPlatform(TrainPlatform):
         self.port = port
         self.user = user
         self.key_path = key_path
+
+    def _job_marker(self, job_id: str) -> str:
+        return f"evo_train_{job_id}"
+
+    def _job_pid_file(self, job_id: str) -> str:
+        return f"/tmp/{self._job_marker(job_id)}.pid"
+
+    def _job_log_file(self, job_id: str) -> str:
+        return f"/tmp/{self._job_marker(job_id)}.log"
+
+    def _working_directory(self, job_config: dict[str, Any]) -> str | None:
+        workdir = job_config.get("workdir") or os.environ.get("AUTODL_WORKDIR")
+        if workdir is None:
+            return None
+        text = str(workdir).strip()
+        return text or None
 
     def _connection_settings(self) -> tuple[str, int, str, str]:
         host = require_value(self.host or os.environ.get("AUTODL_HOST"), "AUTODL_HOST")
@@ -71,13 +87,25 @@ class AutoDLPlatform(TrainPlatform):
         finally:
             client.close()
 
-    def _job_marker(self, job_id: str) -> str:
-        return f"evo_train_{job_id}"
+    def _build_remote_command(self, job_id: str, command: str, workdir: str | None) -> str:
+        remote_parts: list[str] = []
+        if workdir:
+            remote_parts.append(f"cd {shlex.quote(workdir)}")
+        remote_parts.append("export PYTHONUNBUFFERED=1")
+        remote_parts.append(f"exec -a {shlex.quote(self._job_marker(job_id))} bash -lc {shlex.quote(command)}")
+        launch_script = " && ".join(remote_parts)
+        pid_file = self._job_pid_file(job_id)
+        log_file = self._job_log_file(job_id)
+        return (
+            f"nohup bash -lc {shlex.quote(launch_script)} "
+            f">{shlex.quote(log_file)} 2>&1 < /dev/null & "
+            f"echo $! > {shlex.quote(pid_file)} && echo {shlex.quote(job_id)}"
+        )
 
     def submit(self, job_config: dict[str, Any]) -> str:
         command = build_train_command(job_config)
-        job_id = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-        marker = self._job_marker(job_id)
+        job_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+        workdir = self._working_directory(job_config)
 
         if config_bool(job_config, "dry_run"):
             host, port, user, _ = self._connection_settings()
@@ -89,6 +117,7 @@ class AutoDLPlatform(TrainPlatform):
                         "user": user,
                         "job_id": job_id,
                         "command": command,
+                        "workdir": workdir or "",
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -97,26 +126,27 @@ class AutoDLPlatform(TrainPlatform):
             )
             return ""
 
-        launch_script = f"exec -a {shlex.quote(marker)} bash -lc {shlex.quote(command)}"
-        remote_command = (
-            f"nohup bash -lc {shlex.quote(launch_script)} "
-            f">/tmp/{marker}.log 2>&1 < /dev/null & echo {shlex.quote(job_id)}"
-        )
+        remote_command = self._build_remote_command(job_id, command, workdir)
         exit_status, stdout, stderr = self._exec(remote_command)
         if exit_status != 0:
             raise RuntimeError(f"AutoDL submit failed: {stderr or stdout or 'unknown error'}")
         return stdout or job_id
 
     def status(self, job_id: str) -> str:
-        marker = self._job_marker(job_id)
-        _, stdout, _ = self._exec(
-            f"ps aux | grep -F -- {shlex.quote(marker)} | grep -v grep || true"
+        pid_file = self._job_pid_file(job_id)
+        exit_status, stdout, _ = self._exec(
+            f"if [ -f {shlex.quote(pid_file)} ] && kill -0 $(cat {shlex.quote(pid_file)}) 2>/dev/null; "
+            "then echo Running; else echo Unknown; fi"
         )
-        return "Running" if stdout else "Unknown"
+        if exit_status != 0:
+            return "Unknown"
+        return stdout or "Unknown"
 
     def stop(self, job_id: str) -> None:
-        marker = self._job_marker(job_id)
+        pid_file = self._job_pid_file(job_id)
         self._exec(
-            f"ps aux | grep -F -- {shlex.quote(marker)} | grep -v grep "
-            "| awk '{print $2}' | xargs -r kill"
+            f"if [ -f {shlex.quote(pid_file)} ]; then "
+            f"kill $(cat {shlex.quote(pid_file)}) 2>/dev/null || true; "
+            f"rm -f {shlex.quote(pid_file)}; "
+            "fi"
         )
