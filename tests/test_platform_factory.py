@@ -19,6 +19,10 @@ class PlatformFactoryTests(unittest.TestCase):
         platform = get_platform("aliyun_dlc")
         self.assertIsInstance(platform, AliyunDLCPlatform)
 
+    def test_factory_accepts_aliyun_alias(self) -> None:
+        platform = get_platform("aliyun")
+        self.assertIsInstance(platform, AliyunDLCPlatform)
+
     def test_factory_returns_autodl_platform(self) -> None:
         platform = get_platform("autodl")
         self.assertIsInstance(platform, AutoDLPlatform)
