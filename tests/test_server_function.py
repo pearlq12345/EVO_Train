@@ -161,7 +161,7 @@ class ServerFunctionTests(unittest.TestCase):
             dataset_path="/mnt/data/demo",
         )
         platform = MagicMock()
-        platform.status.return_value = "Running"
+        platform.metadata.return_value = {"status": "Running", "last_error": ""}
 
         with patch.object(server_function, "get_platform", return_value=platform):
             response = server_function.handle_request(
@@ -170,6 +170,27 @@ class ServerFunctionTests(unittest.TestCase):
 
         self.assertEqual(response["message"], "sync success")
         self.assertEqual(response["tasks"][0]["status"], "Running")
+
+    def test_sync_persists_platform_error_message(self) -> None:
+        self.store.add(
+            "pearl",
+            "run-003b",
+            status="Submitted",
+            provider="autodl",
+            remote_job_id="remote-003b",
+            checkpoint_path="/mnt/checkpoints/run-003b",
+            dataset_path="/mnt/data/demo",
+        )
+        platform = MagicMock()
+        platform.metadata.return_value = {"status": "Failed", "last_error": "RuntimeError: boom"}
+
+        with patch.object(server_function, "get_platform", return_value=platform):
+            response = server_function.handle_request(
+                json.dumps({"username": "pearl", "action": "任务同步"}, ensure_ascii=False)
+            )
+
+        self.assertEqual(response["tasks"][0]["status"], "Failed")
+        self.assertEqual(response["tasks"][0]["error"], "RuntimeError: boom")
 
     def test_stop_training_calls_platform_and_marks_task_stopped(self) -> None:
         self.store.add(

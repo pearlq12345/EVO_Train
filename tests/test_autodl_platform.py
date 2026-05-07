@@ -65,7 +65,7 @@ class AutoDLPlatformTests(unittest.TestCase):
         self.assertIn("cd /root/project", commands[0])
 
     def test_status_reads_pid_file(self) -> None:
-        with patch.object(self.platform, "_exec", return_value=(0, "Running", "")) as mocked_exec:
+        with patch.object(self.platform, "_exec", return_value=(0, "__STATUS__=Running", "")) as mocked_exec:
             status = self.platform.status("job-789")
 
         self.assertEqual(status, "Running")
@@ -74,22 +74,37 @@ class AutoDLPlatformTests(unittest.TestCase):
         self.assertIn(".stopped", mocked_exec.call_args.args[0])
 
     def test_status_can_report_success(self) -> None:
-        with patch.object(self.platform, "_exec", return_value=(0, "Succeeded", "")):
+        with patch.object(self.platform, "_exec", return_value=(0, "__STATUS__=Succeeded", "")):
             status = self.platform.status("job-790")
 
         self.assertEqual(status, "Succeeded")
 
     def test_status_can_report_failure(self) -> None:
-        with patch.object(self.platform, "_exec", return_value=(0, "Failed", "")):
+        with patch.object(
+            self.platform,
+            "_exec",
+            return_value=(0, "__STATUS__=Failed\nTraceback line 1\nTraceback line 2", ""),
+        ):
             status = self.platform.status("job-791")
 
         self.assertEqual(status, "Failed")
 
     def test_status_can_report_stopped(self) -> None:
-        with patch.object(self.platform, "_exec", return_value=(0, "STOPPED", "")):
+        with patch.object(self.platform, "_exec", return_value=(0, "__STATUS__=STOPPED", "")):
             status = self.platform.status("job-792")
 
         self.assertEqual(status, "STOPPED")
+
+    def test_metadata_returns_failure_log_tail(self) -> None:
+        with patch.object(
+            self.platform,
+            "_exec",
+            return_value=(0, "__STATUS__=Failed\nRuntimeError: boom\ntrain failed", ""),
+        ):
+            metadata = self.platform.metadata("job-793")
+
+        self.assertEqual(metadata["status"], "Failed")
+        self.assertIn("RuntimeError: boom", metadata["last_error"])
 
     def test_stop_removes_pid_file(self) -> None:
         with patch.object(self.platform, "_exec", return_value=(0, "", "")) as mocked_exec:

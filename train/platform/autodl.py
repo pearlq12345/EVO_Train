@@ -151,21 +151,34 @@ class AutoDLPlatform(TrainPlatform):
         return stdout or job_id
 
     def status(self, job_id: str) -> str:
+        return self.metadata(job_id)["status"]
+
+    def metadata(self, job_id: str) -> dict[str, str]:
         pid_file = self._job_pid_file(job_id)
         exit_file = self._job_exit_file(job_id)
         stop_file = self._job_stop_file(job_id)
+        log_file = self._job_log_file(job_id)
         exit_status, stdout, _ = self._exec(
-            f"if [ -f {shlex.quote(pid_file)} ] && kill -0 $(cat {shlex.quote(pid_file)}) 2>/dev/null; "
-            f"then echo Running; "
-            f"elif [ -f {shlex.quote(stop_file)} ]; then echo STOPPED; "
+            f"if [ -f {shlex.quote(pid_file)} ] && kill -0 $(cat {shlex.quote(pid_file)}) 2>/dev/null; then "
+            "status=Running; "
+            f"elif [ -f {shlex.quote(stop_file)} ]; then status=STOPPED; "
             f"elif [ -f {shlex.quote(exit_file)} ]; then "
             f"code=$(cat {shlex.quote(exit_file)}); "
-            'if [ "$code" = "0" ]; then echo Succeeded; else echo Failed; fi; '
-            "else echo Unknown; fi"
+            'if [ "$code" = "0" ]; then status=Succeeded; else status=Failed; fi; '
+            "else status=Unknown; fi; "
+            'printf "__STATUS__=%s\\n" "$status"; '
+            f'if [ "$status" = "Failed" ] && [ -f {shlex.quote(log_file)} ]; then '
+            f"tail -n 20 {shlex.quote(log_file)}; "
+            "fi"
         )
         if exit_status != 0:
-            return "Unknown"
-        return stdout or "Unknown"
+            return {"status": "Unknown", "last_error": ""}
+
+        lines = stdout.splitlines()
+        status_line = lines[0] if lines else "__STATUS__=Unknown"
+        status = status_line.split("=", 1)[1] if "=" in status_line else "Unknown"
+        last_error = "\n".join(line for line in lines[1:] if line.strip())
+        return {"status": status or "Unknown", "last_error": last_error}
 
     def stop(self, job_id: str) -> None:
         pid_file = self._job_pid_file(job_id)

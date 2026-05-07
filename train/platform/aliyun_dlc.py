@@ -248,6 +248,13 @@ class AliyunDLCPlatform(TrainPlatform):
         body = self.fetch_job_body(job_id, need_detail=False)
         return str(getattr(body, "status", "") or "")
 
+    def metadata(self, job_id: str) -> dict[str, str]:
+        body = self.fetch_job_body(job_id, need_detail=False)
+        return {
+            "status": str(getattr(body, "status", "") or ""),
+            "last_error": str(getattr(body, "reason_message", "") or ""),
+        }
+
     def stop(self, job_id: str) -> None:
         body = stop_job_body(self._client_instance(), job_id)
         print_json(body)

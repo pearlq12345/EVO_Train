@@ -151,8 +151,13 @@ def _refresh_task(username: str, task: dict[str, str], request: dict[str, Any]) 
 
     start_train.load_env(_request_optional_string(request, "envFile"))
     platform = _resolve_platform(provider, request)
-    current_status = platform.status(remote_job_id)
-    sql_update_user_task(username, task["taskName"], status=current_status or status, last_error="")
+    metadata = platform.metadata(remote_job_id)
+    sql_update_user_task(
+        username,
+        task["taskName"],
+        status=metadata.get("status") or status,
+        last_error=metadata.get("last_error", ""),
+    )
 
 
 def _refresh_user_tasks(username: str, request: dict[str, Any]) -> list[dict[str, str]]:

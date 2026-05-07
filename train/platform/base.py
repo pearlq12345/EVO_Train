@@ -20,6 +20,10 @@ class TrainPlatform(ABC):
     def stop(self, job_id: str) -> None:
         """Stop one remote job."""
 
+    def metadata(self, job_id: str) -> dict[str, str]:
+        """Return one job's current metadata in a common shape."""
+        return {"status": self.status(job_id), "last_error": ""}
+
 
 def first_value(*values: str | None) -> str | None:
     for value in values:
