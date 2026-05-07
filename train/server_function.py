@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""Training task business functions for the TCP server."""
+"""
+Author: Ru-hulu
+Date: 2026-05-03
 
+Handle each user request and return the user's current task list.
+"""
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from sql_lite.sql_pack import sql_add_user_task, sql_delete_user_task, sql_get_user_all_task
+from sql_lite.sql_pack import sql_add_user_task, sql_delete_user_task, sql_get_user_all_task, sql_get_user_jobid
+from train.send_pai_request import PaiRequest
+from train.user_param import UserTrainCmd
 
-
+# 这里设计的时候先考虑用阻塞的方案来解决：每次任务起来以后，只有等到任务创建成功/失败 任务删除成功/失败的时候才会返回。
+# 这样设计一方面是考虑当前并发-资源的关系很协调，另一方面是考虑用户体验，可以持续的看到当前创建任务过程的进展。
+# 任务创建的过程大概会持续60s左右，主要是镜像比较大。
 def handle_request(text: str) -> dict[str, Any]:
-    """Handle one complete JSON request and return a response dict."""
     try:
         request = json.loads(text)
     except json.JSONDecodeError:
@@ -25,11 +32,21 @@ def handle_request(text: str) -> dict[str, Any]:
     if not username or not task_name:
         return {"message": "invalid request", "tasks": tasks}
     if action == "开始训练":
-        if sql_add_user_task(username, task_name):
+        user_cmd = UserTrainCmd(request).create_train_cmd()
+        this_req = PaiRequest(user_cmd)
+        this_req.submit_job()
+        if sql_add_user_task(username, task_name, this_req.job_id):
             message = "create task success"
             tasks = sql_get_user_all_task(username)
         else:
             message = "create task failed"
+    elif action == "查询状态":
+        job_id = sql_get_user_jobid(username, task_name)
+        if job_id:
+            this_req = PaiRequest("", job_id)
+            message = this_req.query_job()
+        else:
+            message = "query status failed"
     elif action == "结束训练":
         if sql_delete_user_task(username, task_name):
             message = "delete task success"

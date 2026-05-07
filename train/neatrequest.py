@@ -1,6 +1,12 @@
-import os
-import time  # 用于轮询等待
+"""
+Author: Ru-hulu
+Date: 2026-05-03
 
+This script can be used to test the basic function of pai.
+It should be executed in ECS.
+"""
+import os
+import time
 from alibabacloud_pai_dlc20201203.client import Client
 from alibabacloud_pai_dlc20201203.models import (
     CreateJobRequest,

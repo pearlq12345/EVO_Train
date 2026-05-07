@@ -231,10 +231,9 @@ def close_registered_sockets(selector: selectors.BaseSelector) -> None:
             close_client(client, "server stopping")
             # 这里关闭的是客户端监听socket
 
-def serve(args: argparse.Namespace) -> None:
+def serve(args: argparse.Namespace, pool: ThreadPool) -> None:
     """Run the selector loop and hand read events to the worker pool."""
     selector = selectors.DefaultSelector()
-    pool = ThreadPool(args.workers, task_handler=handle_request_text)
     timer_heap: TimerHeap = []
     timer_counter = itertools.count()
     server = make_server_socket(args.host, args.port, args.max_connections)
@@ -319,7 +318,8 @@ def main() -> int:
         print("--idle-timeout must be greater than 0", file=sys.stderr)
         return 2
 
-    serve(args)
+    pool = ThreadPool(args.workers, task_handler=handle_request_text)
+    serve(args, pool)
     return 0
 
 

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Load data from Alibaba Cloud OSS to a CPFS directory."""
+"""
+Author: Ru-hulu
+Date: 2026-05-03
+
+Load data from Alibaba Cloud OSS to a CPFS directory.
+"""
 # python3 scripts/load_oss_to_cpfs.py \
 #   --oss 'oss://evo-data/user_uploads/0e00c623-5730-495b-b958-069eff663555/c2f4e378-bf8e-48b9-9c36-a7aff9a0677c/libero_10_no_noops_1.0.0_lerobot/' \
 #   --cpfs /mnt/libero_10_no_noops_1.0.0_lerobot \

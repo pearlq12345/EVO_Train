@@ -70,6 +70,7 @@ def _init_db(conn: Any) -> None:
             CREATE TABLE IF NOT EXISTS user_tasks (
                 username VARCHAR(255) NOT NULL,
                 task_name VARCHAR(255) NOT NULL,
+                job_id VARCHAR(255) NOT NULL DEFAULT '',
                 status VARCHAR(255) NOT NULL DEFAULT '',
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (username, task_name),
@@ -77,6 +78,15 @@ def _init_db(conn: Any) -> None:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """
         )
+        cursor.execute("SHOW COLUMNS FROM user_tasks LIKE 'job_id'")
+        if not cursor.fetchone():
+            cursor.execute(
+                """
+                ALTER TABLE user_tasks
+                ADD COLUMN job_id VARCHAR(255) NOT NULL DEFAULT ''
+                AFTER task_name
+                """
+            )
 
 
 def sql_get_user_all_task(username: str) -> list[dict[str, str]]:
@@ -96,17 +106,46 @@ def sql_get_user_all_task(username: str) -> list[dict[str, str]]:
     return [{"taskName": row["task_name"], "status": row["status"]} for row in rows]
 
 
-def sql_add_user_task(username: str, task_name: str) -> bool:
-    """Add a task for one user. Return False when the task already exists."""
+def sql_get_user_jobid(username: str, task_name: str) -> str | None:
+    """Return the job ID for one user's task, or None when not found."""
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT job_id
+            FROM user_tasks
+            WHERE username = %s AND task_name = %s
+            """,
+            (username, task_name),
+        )
+        row = cursor.fetchone()
+
+    if not row:
+        return None
+    return row["job_id"] or None
+
+
+def sql_add_user_task(username: str, task_name: str, job_id: str) -> bool:
+    """Add one task and job ID for one user. Return False when either already exists."""
     pymysql, _ = _load_pymysql()
     try:
         with _connect() as conn, conn.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO user_tasks (username, task_name, status)
-                VALUES (%s, %s, '')
+                SELECT 1
+                FROM user_tasks
+                WHERE username = %s AND job_id = %s
+                LIMIT 1
                 """,
-                (username, task_name),
+                (username, job_id),
+            )
+            if cursor.fetchone():
+                return False
+            cursor.execute(
+                """
+                INSERT INTO user_tasks (username, task_name, job_id, status)
+                VALUES (%s, %s, %s, '')
+                """,
+                (username, task_name, job_id),
             )
         return True
     except pymysql.err.IntegrityError:
@@ -114,7 +153,7 @@ def sql_add_user_task(username: str, task_name: str) -> bool:
 
 
 def sql_delete_user_task(username: str, task_name: str) -> bool:
-    """Delete a task for one user. Return True only when a row was deleted."""
+    """Delete one user's task and its job ID. Return True only when a row was deleted."""
     with _connect() as conn, conn.cursor() as cursor:
         cursor.execute(
             """

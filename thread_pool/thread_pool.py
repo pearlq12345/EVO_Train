@@ -3,8 +3,8 @@
 Author: Ru-hulu
 Date: 2026-05-03
 
-This module implements a daemon thread pool with 4 or 8 worker threads
-to consume and process queued training tasks safely and efficiently.
+This module implements a thread pool with 4 or 8 worker threads
+to consume and process the queued request from users safely and efficiently.
 It supports task submission, concurrent execution, and graceful shutdown.
 """
 from __future__ import annotations
