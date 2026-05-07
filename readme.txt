@@ -30,9 +30,16 @@ structure：
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          sql_pack.py                                                                                                      
-│  1. SQLite 初始化                                                    
+│  1. 阿里云 RDS MySQL 初始化                                          
 │  2. sql_get_user_all_task    获取一个用户的所有任务                  
 │  3. sql_add_user_task        为一个用户添加任务                       
 │  4. sql_delete_user_task     删除一个用户的某个任务                   
-│  5. 数据持久化到：/Users/hongru/project/EVO_Train/sql_lite_data       
+│  5. 通过 EVO_TRAIN_DATABASE_URL 或 DATABASE_URL 连接数据库            
 └─────────────────────────────────────────────────────────────────────┘
+
+database：
+      pip install PyMySQL
+      export EVO_TRAIN_DATABASE_URL='mysql+pymysql://user:password@rm-xxxx.mysql.rds.aliyuncs.com:3306/evo_train?charset=utf8mb4'
+
+      # 兼容 evo-data_backend 的配置命名，也可以使用：
+      export DATABASE_URL='mysql+pymysql://user:password@rm-xxxx.mysql.rds.aliyuncs.com:3306/evo_train?charset=utf8mb4'

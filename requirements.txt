@@ -1,3 +1,4 @@
 alibabacloud_pai-dlc20201203
 alibabacloud_tea_openapi
 paramiko
+PyMySQL==1.1.1

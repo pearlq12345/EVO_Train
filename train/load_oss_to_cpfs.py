@@ -6,7 +6,7 @@
 #   --endpoint https://oss-cn-hangzhou-internal.aliyuncs.com \
 #   --jobs 32 \
 #   --update
-
+# user_uploads/0e00c623-5730-495b-b958-069eff663555/a42b1ce1-02ed-4023-b80b-fcfbbaf755dc/260407-szk-TestData
 # -oss: the directory of source data
 # -cpfs: the directory of destination
 # -endpoint: Designate network access entry for OSS. It can be find in .env
