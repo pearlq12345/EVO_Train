@@ -44,6 +44,12 @@ class AutoDLPlatform(TrainPlatform):
     def _job_log_file(self, job_id: str) -> str:
         return f"/tmp/{self._job_marker(job_id)}.log"
 
+    def _job_exit_file(self, job_id: str) -> str:
+        return f"/tmp/{self._job_marker(job_id)}.exit"
+
+    def _job_stop_file(self, job_id: str) -> str:
+        return f"/tmp/{self._job_marker(job_id)}.stopped"
+
     def _working_directory(self, job_config: dict[str, Any]) -> str | None:
         workdir = job_config.get("workdir") or os.environ.get("AUTODL_WORKDIR")
         if workdir is None:
@@ -88,18 +94,30 @@ class AutoDLPlatform(TrainPlatform):
             client.close()
 
     def _build_remote_command(self, job_id: str, command: str, workdir: str | None) -> str:
-        remote_parts: list[str] = []
-        if workdir:
-            remote_parts.append(f"cd {shlex.quote(workdir)}")
-        remote_parts.append("export PYTHONUNBUFFERED=1")
-        remote_parts.append(f"exec -a {shlex.quote(self._job_marker(job_id))} bash -lc {shlex.quote(command)}")
-        launch_script = " && ".join(remote_parts)
         pid_file = self._job_pid_file(job_id)
         log_file = self._job_log_file(job_id)
+        exit_file = self._job_exit_file(job_id)
+        stop_file = self._job_stop_file(job_id)
+        remote_parts = [
+            "status=0",
+            f"echo $$ > {shlex.quote(pid_file)}",
+            f"rm -f {shlex.quote(exit_file)} {shlex.quote(stop_file)}",
+        ]
+        if workdir:
+            remote_parts.append(f"cd {shlex.quote(workdir)} || status=$?")
+        remote_parts.extend(
+            [
+                'if [ "$status" -eq 0 ]; then export PYTHONUNBUFFERED=1; fi',
+                f'if [ "$status" -eq 0 ]; then bash -lc {shlex.quote(command)}; status=$?; fi',
+                f"echo $status > {shlex.quote(exit_file)}",
+                f"rm -f {shlex.quote(pid_file)}",
+            ]
+        )
+        launch_script = "; ".join(remote_parts)
         return (
             f"nohup bash -lc {shlex.quote(launch_script)} "
             f">{shlex.quote(log_file)} 2>&1 < /dev/null & "
-            f"echo $! > {shlex.quote(pid_file)} && echo {shlex.quote(job_id)}"
+            f"echo {shlex.quote(job_id)}"
         )
 
     def submit(self, job_config: dict[str, Any]) -> str:
@@ -134,9 +152,16 @@ class AutoDLPlatform(TrainPlatform):
 
     def status(self, job_id: str) -> str:
         pid_file = self._job_pid_file(job_id)
+        exit_file = self._job_exit_file(job_id)
+        stop_file = self._job_stop_file(job_id)
         exit_status, stdout, _ = self._exec(
             f"if [ -f {shlex.quote(pid_file)} ] && kill -0 $(cat {shlex.quote(pid_file)}) 2>/dev/null; "
-            "then echo Running; else echo Unknown; fi"
+            f"then echo Running; "
+            f"elif [ -f {shlex.quote(stop_file)} ]; then echo STOPPED; "
+            f"elif [ -f {shlex.quote(exit_file)} ]; then "
+            f"code=$(cat {shlex.quote(exit_file)}); "
+            'if [ "$code" = "0" ]; then echo Succeeded; else echo Failed; fi; '
+            "else echo Unknown; fi"
         )
         if exit_status != 0:
             return "Unknown"
@@ -144,9 +169,11 @@ class AutoDLPlatform(TrainPlatform):
 
     def stop(self, job_id: str) -> None:
         pid_file = self._job_pid_file(job_id)
+        stop_file = self._job_stop_file(job_id)
         self._exec(
             f"if [ -f {shlex.quote(pid_file)} ]; then "
             f"kill $(cat {shlex.quote(pid_file)}) 2>/dev/null || true; "
             f"rm -f {shlex.quote(pid_file)}; "
-            "fi"
+            "fi; "
+            f"echo STOPPED > {shlex.quote(stop_file)}"
         )

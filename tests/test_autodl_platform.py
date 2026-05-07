@@ -49,6 +49,8 @@ class AutoDLPlatformTests(unittest.TestCase):
         self.assertIn("/tmp/evo_train_", remote_command)
         self.assertIn(".pid", remote_command)
         self.assertIn(".log", remote_command)
+        self.assertIn(".exit", remote_command)
+        self.assertIn(".stopped", remote_command)
 
     def test_submit_uses_workdir_from_job_config(self) -> None:
         commands: list[str] = []
@@ -68,6 +70,26 @@ class AutoDLPlatformTests(unittest.TestCase):
 
         self.assertEqual(status, "Running")
         self.assertIn(".pid", mocked_exec.call_args.args[0])
+        self.assertIn(".exit", mocked_exec.call_args.args[0])
+        self.assertIn(".stopped", mocked_exec.call_args.args[0])
+
+    def test_status_can_report_success(self) -> None:
+        with patch.object(self.platform, "_exec", return_value=(0, "Succeeded", "")):
+            status = self.platform.status("job-790")
+
+        self.assertEqual(status, "Succeeded")
+
+    def test_status_can_report_failure(self) -> None:
+        with patch.object(self.platform, "_exec", return_value=(0, "Failed", "")):
+            status = self.platform.status("job-791")
+
+        self.assertEqual(status, "Failed")
+
+    def test_status_can_report_stopped(self) -> None:
+        with patch.object(self.platform, "_exec", return_value=(0, "STOPPED", "")):
+            status = self.platform.status("job-792")
+
+        self.assertEqual(status, "STOPPED")
 
     def test_stop_removes_pid_file(self) -> None:
         with patch.object(self.platform, "_exec", return_value=(0, "", "")) as mocked_exec:
@@ -76,6 +98,7 @@ class AutoDLPlatformTests(unittest.TestCase):
         command = mocked_exec.call_args.args[0]
         self.assertIn(".pid", command)
         self.assertIn("rm -f", command)
+        self.assertIn(".stopped", command)
 
 
 if __name__ == "__main__":
