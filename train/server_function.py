@@ -22,7 +22,7 @@ def handle_request(text: str) -> dict[str, Any]:
         request = json.loads(text)
     except json.JSONDecodeError:
         return {"message": "invalid json", "tasks": []}
-
+    # TODO：检查资源，如果资源不足立即返回，这样运行中的线程就都是在处理相关业务。
     username = str(request.get("username") or "").strip()
     task_name = str(request.get("taskName") or "").strip()
     action = str(request.get("action") or "").strip()
@@ -34,19 +34,20 @@ def handle_request(text: str) -> dict[str, Any]:
     if action == "开始训练":
         user_cmd = UserTrainCmd(request).create_train_cmd()
         this_req = PaiRequest(user_cmd)
-        this_req.submit_job()
+        this_req.submit_job() ## TODO:没有做兜底逻辑
         if sql_add_user_task(username, task_name, this_req.job_id):
             message = "create task success"
             tasks = sql_get_user_all_task(username)
         else:
             message = "create task failed"
     elif action == "查询状态":
+        # TODO: 很多兜底逻辑没有写，如果用户恶意访问，给空的taskname会出问题
         job_id = sql_get_user_jobid(username, task_name)
         if job_id:
             this_req = PaiRequest("", job_id)
-            message = this_req.query_job()
+            message = f"{task_name}: {this_req.query_job()}"
         else:
-            message = "query status failed"
+            message = f"{task_name}: query status failed, job id dose not exist."
     elif action == "结束训练":
         if sql_delete_user_task(username, task_name):
             message = "delete task success"
