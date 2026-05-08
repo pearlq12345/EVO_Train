@@ -3,7 +3,7 @@
 from __future__ import annotations
 import os
 from alibabacloud_pai_dlc20201203.client import Client
-from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, JobSpec, ResourceConfig
+from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, GetWebTerminalRequest, JobSpec, ResourceConfig
 from alibabacloud_tea_openapi.models import Config
 
 DEFAULT_REGION = "cn-hangzhou"
@@ -87,4 +87,12 @@ class PaiRequest:
         job = self.client.get_job(self.job_id, GetJobRequest()).body
         status = job.status
         print(f"任务状态: {status}")
-        return status
+        if status != "Running":
+            return status            
+        pod_id = job.pods[0].pod_id # 如果容器没有起来，id不可靠
+        response = self.client.get_web_terminal(
+            self.job_id,
+            pod_id,
+            GetWebTerminalRequest(is_shared=True),
+        )
+        return f"{status}, Link: {response.body.web_terminal_url}"
