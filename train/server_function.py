@@ -32,6 +32,7 @@ def handle_request(text: str) -> dict[str, Any]:
     if not username or not task_name:
         return {"message": "invalid request", "tasks": tasks}
     if action == "开始训练":
+        # TODO：应该先检查是否有同名任务存在，如果已经存在就返回错误
         user_cmd = UserTrainCmd(request).create_train_cmd()
         this_req = PaiRequest(user_cmd)
         this_req.submit_job() ## TODO:没有做兜底逻辑
@@ -49,11 +50,22 @@ def handle_request(text: str) -> dict[str, Any]:
         else:
             message = f"{task_name}: query status failed, job id dose not exist."
     elif action == "结束训练":
-        if sql_delete_user_task(username, task_name):
-            message = "delete task success"
-            tasks = sql_get_user_all_task(username)
+        job_id = sql_get_user_jobid(username, task_name)
+        if job_id:
+            this_req = PaiRequest("", job_id)
+            this_req.stop_job()
+            message = f"{task_name}: stop success."
         else:
-            message = "delete task failed"
+            message = f"{task_name}: stop failed, job id does not exist."
+        if sql_delete_user_task(username, task_name):
+            message = f"{message} Update sql success"
+        else:
+            message = f"{message} Update sql failed"
+        tasks = sql_get_user_all_task(username)
+        # TODO 结束停止训练任务，但是不要杀掉容器
+    elif action == "删除任务":
+        message = "delete action"
+        # TODO 需要删除任务所有的相关存储空间，这里需要对用户的存储空间进行约定。        
     else:
         message = "invalid action"
     return {"message": message, "tasks": tasks}

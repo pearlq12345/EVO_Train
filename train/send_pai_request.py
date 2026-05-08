@@ -3,7 +3,7 @@
 from __future__ import annotations
 import os
 from alibabacloud_pai_dlc20201203.client import Client
-from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, JobSpec, ResourceConfig
+from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, JobSpec, ResourceConfig, StopJobRequest
 from alibabacloud_tea_openapi.models import Config
 
 DEFAULT_REGION = "cn-hangzhou"
@@ -48,7 +48,7 @@ class PaiRequest:
             raise RuntimeError(f"Missing required environment variable: {name}")
         return value
 
-    def build_request(self) -> CreateJobRequest:
+    def build_create_request(self) -> CreateJobRequest:
         job_spec = JobSpec(
             type=DEFAULT_ROLE,
             image=DEFAULT_IMAGE,
@@ -73,12 +73,15 @@ class PaiRequest:
                 default_route=DEFAULT_ROUTE,
             ),
         )
-
     def submit_job(self) -> None:
-        response = self.client.create_job(self.build_request())
+        response = self.client.create_job(self.build_create_request())
         self.job_id = response.body.job_id
         print(f"任务提交成功！Job ID: {self.job_id}")
         print("开始实时跟踪任务状态...\n")
+
+    def stop_job(self) -> None:
+        self.client.stop_job(self.job_id, StopJobRequest())
+        print(f"任务停止请求已发送！Job ID: {self.job_id}")
 
     def query_job(self) -> str:
         job = self.client.get_job(self.job_id, GetJobRequest()).body
