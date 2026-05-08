@@ -55,8 +55,10 @@ def handle_request(text: str) -> dict[str, Any]:
             this_req = PaiRequest("", job_id)
             this_req.stop_job()
             message = f"{task_name}: stop success."
+            print(f"[成功查询job_id] {message}")
         else:
             message = f"{task_name}: stop failed, job id does not exist."
+            print(f"[job_id不存在] {message}")
         if sql_delete_user_task(username, task_name):
             message = f"{message} Update sql success"
         else:
