@@ -10,6 +10,7 @@ It supports task submission, concurrent execution, and graceful shutdown.
 from __future__ import annotations
 
 import argparse
+import json
 import queue
 import socket
 import threading
@@ -19,6 +20,7 @@ from typing import Any, Callable
 
 
 STOP_EVENT = object()
+DOWNLOAD_PATH_KEY = "_downloadPath"
 
 
 @dataclass
@@ -26,6 +28,7 @@ class TrainTaskEvent:
     client_id: str
     request_text: str
     response_callback: Callable[[str], None] | None = None
+    client_socket: socket.socket | None = None
 
 
 @dataclass
@@ -55,7 +58,7 @@ class ThreadPool:
     def __init__(
         self,
         workers: int,
-        lite_task_handler: Callable[[str], str] = fake_lite_task_handler,
+        lite_task_handler: Callable[[str], dict[str, Any] | str] = fake_lite_task_handler,
         download_task_handler: Callable[[DownloadTaskEvent], None] = fake_download_task_handler,
         download_workers: int = 2,
     ) -> None:
@@ -93,6 +96,11 @@ class ThreadPool:
         """Push one training event into the worker queue."""
         self.train_task_queue.put(event)
         log(f"queued event from {event.client_id}: {event.request_text}")
+
+    def submit_download(self, event: DownloadTaskEvent) -> None:
+        """Push one download event into the download queue."""
+        self.download_task_queue.put(event)
+        log(f"queued download from {event.client_id}: {event.download_path}")
 
     def stop_lite(self) -> None:
         """Stop all lite worker threads after queued work is done."""
@@ -143,14 +151,38 @@ class ThreadPool:
         """Run the task handler and optionally return its response."""
         log(f"worker-{worker_id} handling {event.client_id}: {event.request_text}")
         response = self.lite_task_handler(event.request_text)
+        download_event = self._get_download_event(event, response)
+        response_text = self._prepare_lite_response(response)
         if event.response_callback is not None:
-            event.response_callback(response)
+            event.response_callback(response_text)
+        if download_event is not None:
+            self.submit_download(download_event)
         log(f"worker-{worker_id} finished {event.client_id}")
+
+    def _get_download_event(self, event: TrainTaskEvent, response: dict[str, Any] | str) -> DownloadTaskEvent | None:
+        """Build a download event from the lite response when requested."""
+        if isinstance(response, str):
+            return None
+
+        download_path = response.get(DOWNLOAD_PATH_KEY)
+        if not download_path or event.client_socket is None:
+            return None
+        return DownloadTaskEvent(event.client_id, event.client_socket, str(download_path))
+
+    def _prepare_lite_response(self, response: dict[str, Any] | str) -> str:
+        """Serialize a lite response."""
+        if isinstance(response, str):
+            return response
+
+        response_body = dict(response)
+        response_body.pop(DOWNLOAD_PATH_KEY, None)
+        return json.dumps(response_body, ensure_ascii=False)
 
     # 具体的下载业务函数在这里
     def _handle_download_event(self, worker_id: int, event: Any) -> None:
         """Run the download task handler."""
         log(f"download-worker-{worker_id} handling {event.client_id}: {event.download_path}")
+        # TODO：client_socket 当前是非阻塞 socket，真实下载写入时需要处理 BlockingIOError 或重新设计阻塞/分片写入策略。
         self.download_task_handler(event)
         log(f"download-worker-{worker_id} finished {event.client_id}")
 

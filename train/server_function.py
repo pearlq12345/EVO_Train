@@ -19,11 +19,6 @@ TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
 
 
-def _transfer_checkpoint_files(username: str, task_name: str, checkpoint_dir: str, files: list[str]) -> bool:
-    # TODO：在这里实现 checkpoint_dir 下所有 files 的具体传输逻辑。
-    return False
-
-
 def _start_training(request: dict[str, Any], username: str, task_name: str, tasks: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
     # TODO：应该先检查是否有同名任务存在，如果已经存在就返回错误
     user_cmd = UserTrainCmd(request).create_train_cmd(username, task_name)
@@ -82,44 +77,38 @@ def _delete_task(username: str, task_name: str) -> tuple[str, list[dict[str, str
     return message, sql_get_user_all_task(username)
 
 
-def _download_result(username: str, task_name: str) -> tuple[str, list[dict[str, str]]]:
+def _download_result(username: str, task_name: str) -> dict[str, Any]:
     job_id = sql_get_user_jobid(username, task_name)
     if not job_id:
         message = f"{task_name}: download failed, job id does not exist."
         print(f"[job_id不存在] {message}")
-        return message, sql_get_user_all_task(username)
+        return {"message": message, "tasks": sql_get_user_all_task(username)}
 
     this_req = PaiRequest("", job_id)
     this_req.query_job()
     if this_req.status not in {"Succeeded", "Failed", "Stopped"}:
         message = f"{task_name}: is running, please wait until it finishes."
         print(f"[任务运行中，无法下载] {message}")
-        return message, sql_get_user_all_task(username)
+        return {"message": message, "tasks": sql_get_user_all_task(username)}
 
     checkpoint_dir = CHECKPOINT_OUTPUT_DIR % (username, task_name)
     if not os.path.isdir(checkpoint_dir):
         message = f"{task_name}: download failed, checkpoint does not exist."
         print(f"[checkpoint不存在] {message}")
-        return message, sql_get_user_all_task(username)
+        return {"message": message, "tasks": sql_get_user_all_task(username)}
 
-    files = [
-        os.path.join(root, filename)
-        for root, _, filenames in os.walk(checkpoint_dir)
-        for filename in filenames
-    ]
-    if not files:
+    if not any(filenames for _, _, filenames in os.walk(checkpoint_dir)):
         message = f"{task_name}: download failed, checkpoint is empty."
         print(f"[checkpoint为空] {message}")
-        return message, sql_get_user_all_task(username)
+        return {"message": message, "tasks": sql_get_user_all_task(username)}
 
-    if _transfer_checkpoint_files(username, task_name, checkpoint_dir, files):
-        message = f"{task_name}: results download success."
-        print(f"[结果下载成功] {message}")
-        return message, sql_get_user_all_task(username)
-
-    message = f"{task_name}: download failed, file transfer is not implemented."
-    print(f"[结果下载失败] {message}")
-    return message, sql_get_user_all_task(username)
+    message = f"{task_name}: download task queued."
+    print(f"[结果下载入队] {message}")
+    return {
+        "message": message,
+        "tasks": sql_get_user_all_task(username),
+        "_downloadPath": checkpoint_dir,
+    }
 
 # 这里设计的时候先考虑用阻塞的方案来解决：每次任务起来以后，只有等到任务创建成功/失败 任务删除成功/失败的时候才会返回。
 # 这样设计一方面是考虑当前并发-资源的关系很协调，另一方面是考虑用户体验，可以持续的看到当前创建任务过程的进展。
@@ -148,7 +137,7 @@ def handle_request(text: str) -> dict[str, Any]:
     elif action == "删除任务":
         message, tasks = _delete_task(username, task_name)
     elif action == "结果下载":
-        message, tasks = _download_result(username, task_name)
+        return _download_result(username, task_name)
     else:
         message = "invalid action"
     return {"message": message, "tasks": tasks}
@@ -156,7 +145,9 @@ def handle_request(text: str) -> dict[str, Any]:
 
 def handle_request_text(text: str) -> str:
     """Handle one complete JSON request and return a JSON response string."""
-    return json.dumps(handle_request(text), ensure_ascii=False)
+    response = handle_request(text)
+    response.pop("_downloadPath", None)
+    return json.dumps(response, ensure_ascii=False)
 
 
 def handle_download_task(event: Any) -> None:

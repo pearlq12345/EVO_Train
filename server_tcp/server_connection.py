@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from thread_pool.thread_pool import ThreadPool, TrainTaskEvent
-from train.server_function import handle_download_task, handle_request_text
+from train.server_function import handle_download_task, handle_request
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -215,6 +215,7 @@ def read_client(
         client_id=client.id,
         request_text=request_text,
         response_callback=make_response_callback(selector, client, encoding),
+        client_socket=client.socket,
     )
 
 
@@ -322,7 +323,7 @@ def main() -> int:
 
     pool = ThreadPool(
         args.workers,
-        lite_task_handler=handle_request_text,
+        lite_task_handler=handle_request,
         download_task_handler=handle_download_task,
     )
     serve(args, pool)
