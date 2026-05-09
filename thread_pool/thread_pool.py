@@ -182,8 +182,10 @@ class ThreadPool:
     def _handle_download_event(self, worker_id: int, event: Any) -> None:
         """Run the download task handler."""
         log(f"download-worker-{worker_id} handling {event.client_id}: {event.download_path}")
-        # TODO：client_socket 当前是非阻塞 socket，真实下载写入时需要处理 BlockingIOError 或重新设计阻塞/分片写入策略。
-        self.download_task_handler(event)
+        try:
+            self.download_task_handler(event)
+        except Exception as exc:
+            log(f"download-worker-{worker_id} failed {event.client_id}: {exc}")
         log(f"download-worker-{worker_id} finished {event.client_id}")
 
 

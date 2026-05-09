@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tarfile
 from typing import Any
 
 from sql_lite.sql_pack import sql_add_user_task, sql_delete_user_task, sql_get_user_all_task, sql_get_user_jobid
@@ -17,6 +18,7 @@ from train.send_pai_request import PaiRequest
 from train.user_param import UserTrainCmd
 TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 
 def _start_training(request: dict[str, Any], username: str, task_name: str, tasks: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -152,5 +154,23 @@ def handle_request_text(text: str) -> str:
 
 def handle_download_task(event: Any) -> None:
     """Handle one download task event."""
-    # TODO：实现将 event.download_path 下的结果文件写入 event.client_socket 的逻辑。
     print(f"[结果下载任务] {event.client_id}: {event.download_path}")
+    sock = event.client_socket
+    old_timeout = sock.gettimeout()
+    try:
+        sock.setblocking(True)
+        with sock.makefile("wb", buffering=DOWNLOAD_CHUNK_SIZE) as writer, tarfile.open(fileobj=writer, mode="w|") as tar:
+            for root, _, filenames in os.walk(event.download_path):
+                for filename in filenames:
+                    file_path = os.path.join(root, filename)
+                    arcname = os.path.relpath(file_path, event.download_path)
+                    try:
+                        tar.add(file_path, arcname=arcname, recursive=False)
+                    except FileNotFoundError:
+                        print(f"[结果下载跳过] file disappeared: {file_path}")
+        print(f"[结果下载完成] {event.client_id}: {event.download_path}")
+    finally:
+        try:
+            sock.settimeout(old_timeout)
+        except OSError:
+            pass
