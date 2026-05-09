@@ -95,7 +95,7 @@ def handle_request(text: str) -> dict[str, Any]:
     if action == "开始训练":
         message, tasks = _start_training(request, username, task_name, tasks)
     elif action == "查询状态":
-        message = _query_status(username, task_name, tasks)
+        message = _query_status(username, task_name)
     elif action == "结束训练":
         message, tasks = _stop_training(username, task_name)
     elif action == "删除任务":
