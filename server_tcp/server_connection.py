@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from thread_pool.thread_pool import ThreadPool, TrainTaskEvent
-from train.server_function import handle_request_text
+from train.server_function import handle_download_task, handle_request_text
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -238,7 +238,8 @@ def serve(args: argparse.Namespace, pool: ThreadPool) -> None:
     timer_counter = itertools.count()
     server = make_server_socket(args.host, args.port, args.max_connections)
     selector.register(server, selectors.EVENT_READ, data=None)
-    pool.start()
+    pool.start_lite()
+    pool.start_download()
     log(f"listening on {args.host}:{args.port}, workers={args.workers}, idle_timeout={args.idle_timeout}s")
 
     try:
@@ -266,7 +267,7 @@ def serve(args: argparse.Namespace, pool: ThreadPool) -> None:
                         args.idle_timeout,
                     )
                     if event is not None:
-                        pool.submit(event)
+                        pool.submit_lite(event)
             process_idle_timeouts(selector, timer_heap)
     except KeyboardInterrupt:
         log("stopping")
@@ -274,7 +275,8 @@ def serve(args: argparse.Namespace, pool: ThreadPool) -> None:
         close_registered_sockets(selector)
         selector.close()
         pool.train_task_queue.join()
-        pool.stop()
+        pool.stop_lite()
+        pool.stop_download()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -318,7 +320,11 @@ def main() -> int:
         print("--idle-timeout must be greater than 0", file=sys.stderr)
         return 2
 
-    pool = ThreadPool(args.workers, task_handler=handle_request_text)
+    pool = ThreadPool(
+        args.workers,
+        lite_task_handler=handle_request_text,
+        download_task_handler=handle_download_task,
+    )
     serve(args, pool)
     return 0
 
