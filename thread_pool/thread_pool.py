@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import queue
-import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -28,13 +27,13 @@ class TrainTaskEvent:
     client_id: str
     request_text: str
     response_callback: Callable[[str], None] | None = None
-    client_socket: socket.socket | None = None
+    client: Any | None = None
 
 
 @dataclass
 class DownloadTaskEvent:
     client_id: str
-    client_socket: socket.socket
+    client: Any
     download_path: str
 
 
@@ -165,9 +164,9 @@ class ThreadPool:
             return None
 
         download_path = response.get(DOWNLOAD_PATH_KEY)
-        if not download_path or event.client_socket is None:
+        if not download_path or event.client is None:
             return None
-        return DownloadTaskEvent(event.client_id, event.client_socket, str(download_path))
+        return DownloadTaskEvent(event.client_id, event.client, str(download_path))
 
     def _prepare_lite_response(self, response: dict[str, Any] | str) -> str:
         """Serialize a lite response."""

@@ -31,8 +31,8 @@ DEFAULT_IDLE_TIMEOUT = 120.0
 class Client:
     socket: socket.socket
     address: tuple[str, int]
-    last_active: float
-    idle_deadline: float = 0.0
+    last_active: float # 最后一次业务触发的活跃时间
+    idle_deadline: float = 0.0 # 由最后一次业务活跃时间计算得到的死亡时间，死亡时间到达以后主线程会杀Client
     read_buffer: str = ""
     closed: bool = False
 
@@ -215,7 +215,7 @@ def read_client(
         client_id=client.id,
         request_text=request_text,
         response_callback=make_response_callback(selector, client, encoding),
-        client_socket=client.socket,
+        client=client,
     )
 
 
@@ -232,6 +232,9 @@ def close_registered_sockets(selector: selectors.BaseSelector) -> None:
             close_client(client, "server stopping")
             # 这里关闭的是客户端监听socket
 
+# 先不考虑下载业务的情况。假如lite类业务并发非常高，read_client 120s以后任务都没有被处理完。
+# 这时server函数就会判断连接已经过期，把连接断开。那么线程池在处理的时候，就会发现连接已经断开了。
+# 上述情况是可能存在的，但是我们不考虑。因为任务在队列中120s未被处理，不会有这么高的并发。
 def serve(args: argparse.Namespace, pool: ThreadPool) -> None:
     """Run the selector loop and hand read events to the worker pool."""
     selector = selectors.DefaultSelector()
@@ -266,10 +269,10 @@ def serve(args: argparse.Namespace, pool: ThreadPool) -> None:
                         timer_heap,
                         timer_counter,
                         args.idle_timeout,
-                    )
+                    ) # 这里刷新连接的过期时间，所以不会出现连接业务在处理的时候连接被杀掉的情况。
                     if event is not None:
                         pool.submit_lite(event)
-            process_idle_timeouts(selector, timer_heap)
+            process_idle_timeouts(selector, timer_heap) ## 这里处理过期链接
     except KeyboardInterrupt:
         log("stopping")
     finally:

@@ -155,7 +155,7 @@ def handle_request_text(text: str) -> str:
 def handle_download_task(event: Any) -> None:
     """Handle one download task event."""
     print(f"[结果下载任务] {event.client_id}: {event.download_path}")
-    sock = event.client_socket
+    sock = event.client.socket
     old_timeout = sock.gettimeout()
     try:
         sock.setblocking(True)
