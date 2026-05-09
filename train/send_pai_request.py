@@ -28,10 +28,27 @@ DEFAULT_DATA_SOURCES = [
     CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
     CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"), # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理
 ]
+# status 的取值
+# {
+#     "Creating",
+#     "Queuing",
+#     "Bidding",          # 仅灵骏 Spot 作业
+#     "EnvPreparing",
+#     "SanityChecking",
+#     "Running",
+#     "Restarting",
+#     "Stopping",
+#     "SucceededReserving",
+#     "FailedReserving",
+#     "Succeeded",
+#     "Failed",
+#     "Stopped",
+# }
 
 class PaiRequest:
     def __init__(self, user_cmd: str, job_id: str | None = None) -> None:
         self.user_cmd = user_cmd
+        self.status = ""
         self.client = Client(config=Config(
             access_key_id=self.require_env("ALIBABA_CLOUD_ACCESS_KEY_ID"),
             access_key_secret=self.require_env("ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
@@ -85,14 +102,14 @@ class PaiRequest:
 
     def query_job(self) -> str:
         job = self.client.get_job(self.job_id, GetJobRequest()).body
-        status = job.status
-        print(f"任务状态: {status}")
-        if status != "Running":
-            return status            
+        self.status = job.status
+        print(f"任务状态: {self.status}")
+        if self.status != "Running":
+            return self.status            
         pod_id = job.pods[0].pod_id # 如果容器没有起来，id不可靠
         response = self.client.get_web_terminal(
             self.job_id,
             pod_id,
             GetWebTerminalRequest(is_shared=True),
         )
-        return f"{status}, Link: {response.body.web_terminal_url}"
+        return f"{self.status}, Link: {response.body.web_terminal_url}"

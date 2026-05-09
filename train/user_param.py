@@ -13,7 +13,7 @@ class UserTrainCmd:
     DEFAULT_POLICY_TYPE = "act"
     POLICY_PUSH_TO_HUB = "false"
     POLICY_REPO_ID = "local/libero_10_no_noops_1.0.0_lerobot"
-    OUTPUT_DIR = "/root/checkpoint"
+    OUTPUT_DIR = "/mnt/usrresult/%s/%s/checkpoint" ## username task_name
     POLICY_DEVICE = "cuda"
     POLICY_PRETRAINED_BACKBONE_WEIGHTS = "null"
 
@@ -33,9 +33,10 @@ class UserTrainCmd:
         self.batch_size = int(request.get("batchSize", 16))
         self.log_freq = int(request.get("logFreq", 100))
 
-    def create_train_cmd(self) -> str:
+    def create_train_cmd(self, usrname: str, jobname: str) -> str:
         if self.empty_docker:
             return f"sleep {self.sleep_t}"
+        output_dir = self.OUTPUT_DIR % (usrname, jobname)
         return (
             f"{self.COMMAND} "
             f"--dataset.repo_id={self.DATASET_REPO_ID} "
@@ -44,7 +45,7 @@ class UserTrainCmd:
             f"--policy.type={self.policy_type} "
             f"--policy.push_to_hub={self.POLICY_PUSH_TO_HUB} "
             f"--policy.repo_id={self.POLICY_REPO_ID} "
-            f"--output_dir={self.OUTPUT_DIR} "
+            f"--output_dir={output_dir} "
             f"--steps={self.steps} "
             f"--save_freq={self.save_freq} "
             f"--batch_size={self.batch_size} "
