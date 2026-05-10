@@ -19,22 +19,14 @@ from typing import Any, Callable
 
 
 STOP_EVENT = object()
-DOWNLOAD_PATH_KEY = "_downloadPath"
 
 
 @dataclass
-class TrainTaskEvent:
+class TaskEvent:
     client_id: str
     request_text: str
     response_callback: Callable[[str], None] | None = None
     client: Any | None = None
-
-
-@dataclass
-class DownloadTaskEvent:
-    client_id: str
-    client: Any
-    download_path: str
 
 
 def log(message: str) -> None:
@@ -48,9 +40,8 @@ def fake_lite_task_handler(request_text: str) -> str:
     return f"debug response for: {request_text}"
 
 
-def fake_download_task_handler(event: DownloadTaskEvent) -> None:
+def fake_download_task_handler(event: TaskEvent) -> None:
     """Temporary debug handler for one download event."""
-    log(f"debug download handler for {event.client_id}: {event.download_path}")
 
 
 class ThreadPool:
@@ -58,7 +49,7 @@ class ThreadPool:
         self,
         workers: int,
         lite_task_handler: Callable[[str], dict[str, Any] | str] = fake_lite_task_handler,
-        download_task_handler: Callable[[DownloadTaskEvent], None] = fake_download_task_handler,
+        download_task_handler: Callable[[TaskEvent], None] = fake_download_task_handler,
         download_workers: int = 2,
     ) -> None:
         """Create a 4-thread or 8-thread worker pool."""
@@ -70,9 +61,9 @@ class ThreadPool:
         self.download_workers = download_workers
         self.lite_task_handler = lite_task_handler
         self.download_task_handler = download_task_handler
-        self.train_task_queue: queue.Queue[TrainTaskEvent | object] = queue.Queue()
+        self.train_task_queue: queue.Queue[TaskEvent | object] = queue.Queue()
         self.lite_threads: list[threading.Thread] = [] # 用来处理业务请求，比如任务的管理等
-        self.download_task_queue: queue.Queue[DownloadTaskEvent | object] = queue.Queue()
+        self.download_task_queue: queue.Queue[TaskEvent | object] = queue.Queue()
         self.download_threads: list[threading.Thread] = [] # 用来处理IO密集的请求，占用时间较长。
 
     def start_lite(self) -> None:
@@ -91,15 +82,14 @@ class ThreadPool:
             self.download_threads.append(thread)
         log(f"started {self.download_workers} download worker threads")
 
-    def submit_lite(self, event: TrainTaskEvent) -> None:
+    def submit_lite(self, event: TaskEvent) -> None:
         """Push one training event into the worker queue."""
         self.train_task_queue.put(event)
         log(f"queued event from {event.client_id}: {event.request_text}")
 
-    def submit_download(self, event: DownloadTaskEvent) -> None:
+    def submit_download(self, event: TaskEvent) -> None:
         """Push one download event into the download queue."""
         self.download_task_queue.put(event)
-        log(f"queued download from {event.client_id}: {event.download_path}")
 
     def stop_lite(self) -> None:
         """Stop all lite worker threads after queued work is done."""
@@ -141,50 +131,32 @@ class ThreadPool:
                 if event is STOP_EVENT: # 当前线程从下载任务队列中拿一个任务，处理这个任务。
                     log(f"download-worker-{worker_id} stopping")
                     return
-                self._handle_download_event(worker_id, event)
+                self._download_handle_event(worker_id, event)
             finally:
                 self.download_task_queue.task_done()
 
     # 具体的业务函数在这里
-    def _lite_handle_event(self, worker_id: int, event: Any) -> None:
+    def _lite_handle_event(self, worker_id: int, event: TaskEvent) -> None:
         """Run the task handler and optionally return its response."""
         log(f"worker-{worker_id} handling {event.client_id}: {event.request_text}")
         response = self.lite_task_handler(event.request_text)
-        download_event = self._get_download_event(event, response)
-        response_text = self._prepare_lite_response(response)
+        response_text = self._prepare_response(response)
         if event.response_callback is not None:
             event.response_callback(response_text)
-        if download_event is not None:
-            self.submit_download(download_event)
         log(f"worker-{worker_id} finished {event.client_id}")
 
-    def _get_download_event(self, event: TrainTaskEvent, response: dict[str, Any] | str) -> DownloadTaskEvent | None:
-        """Build a download event from the lite response when requested."""
-        if isinstance(response, str):
-            return None
-
-        download_path = response.get(DOWNLOAD_PATH_KEY)
-        if not download_path or event.client is None:
-            return None
-        return DownloadTaskEvent(event.client_id, event.client, str(download_path))
-
-    def _prepare_lite_response(self, response: dict[str, Any] | str) -> str:
+    def _prepare_response(self, response: dict[str, Any] | str) -> str:
         """Serialize a lite response."""
         if isinstance(response, str):
             return response
-
-        response_body = dict(response)
-        response_body.pop(DOWNLOAD_PATH_KEY, None)
-        return json.dumps(response_body, ensure_ascii=False)
+        return json.dumps(response, ensure_ascii=False)
 
     # 具体的下载业务函数在这里
-    def _handle_download_event(self, worker_id: int, event: Any) -> None:
-        """Run the download task handler."""
-        log(f"download-worker-{worker_id} handling {event.client_id}: {event.download_path}")
-        try:
-            self.download_task_handler(event)
-        except Exception as exc:
-            log(f"download-worker-{worker_id} failed {event.client_id}: {exc}")
+    def _download_handle_event(self, worker_id: int, event: TaskEvent) -> None:
+        response = self.download_task_handler(event)
+        response_text = self._prepare_response(response)
+        if event.response_callback is not None:
+            event.response_callback(response_text)
         log(f"download-worker-{worker_id} finished {event.client_id}")
 
 
@@ -207,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 #     for index in range(10):
 #         pool.submit_lite(
-#             TrainTaskEvent(
+#             TaskEvent(
 #                 client_id=f"client-{index}",
 #                 request_text=f'{{"username":"user-{index % 3}","action":"任务同步"}}',
 #             )

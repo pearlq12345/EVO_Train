@@ -11,11 +11,15 @@ import json
 import os
 import shutil
 import tarfile
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sql_lite.sql_pack import sql_add_user_task, sql_delete_user_task, sql_get_user_all_task, sql_get_user_jobid
 from train.send_pai_request import PaiRequest
 from train.user_param import UserTrainCmd
+
+if TYPE_CHECKING:
+    from thread_pool.thread_pool import TaskEvent
+
 TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
@@ -79,38 +83,32 @@ def _delete_task(username: str, task_name: str) -> tuple[str, list[dict[str, str
     return message, sql_get_user_all_task(username)
 
 
-def _download_result(username: str, task_name: str) -> dict[str, Any]:
+def get_download_path(username: str, task_name: str) -> str:
     job_id = sql_get_user_jobid(username, task_name)
     if not job_id:
-        message = f"{task_name}: download failed, job id does not exist."
-        print(f"[job_id不存在] {message}")
-        return {"message": message, "tasks": sql_get_user_all_task(username)}
+        print("job_id不存在")
+        return "job_id does not exist." + "|" + ""
 
     this_req = PaiRequest("", job_id)
     this_req.query_job()
     if this_req.status not in {"Succeeded", "Failed", "Stopped"}:
         message = f"{task_name}: is running, please wait until it finishes."
         print(f"[任务运行中，无法下载] {message}")
-        return {"message": message, "tasks": sql_get_user_all_task(username)}
-
+        return f"{message}" + "|" + ""
     checkpoint_dir = CHECKPOINT_OUTPUT_DIR % (username, task_name)
     if not os.path.isdir(checkpoint_dir):
         message = f"{task_name}: download failed, checkpoint does not exist."
         print(f"[checkpoint不存在] {message}")
-        return {"message": message, "tasks": sql_get_user_all_task(username)}
+        return f"{message}" + "|" + ""
 
     if not any(filenames for _, _, filenames in os.walk(checkpoint_dir)):
         message = f"{task_name}: download failed, checkpoint is empty."
         print(f"[checkpoint为空] {message}")
-        return {"message": message, "tasks": sql_get_user_all_task(username)}
+        return f"{message}" + "|" + ""
 
     message = f"{task_name}: download task queued."
     print(f"[结果下载入队] {message}")
-    return {
-        "message": message,
-        "tasks": sql_get_user_all_task(username),
-        "_downloadPath": checkpoint_dir,
-    }
+    return f"{message}" + "|" + checkpoint_dir
 
 # 这里设计的时候先考虑用阻塞的方案来解决：每次任务起来以后，只有等到任务创建成功/失败 任务删除成功/失败的时候才会返回。
 # 这样设计一方面是考虑当前并发-资源的关系很协调，另一方面是考虑用户体验，可以持续的看到当前创建任务过程的进展。
@@ -138,37 +136,46 @@ def handle_request(text: str) -> dict[str, Any]:
         message, tasks = _stop_training(username, task_name)
     elif action == "删除任务":
         message, tasks = _delete_task(username, task_name)
-    elif action == "结果下载":
-        return _download_result(username, task_name)
     else:
         message = "invalid action"
     return {"message": message, "tasks": tasks}
 
 
-def handle_request_text(text: str) -> str:
-    """Handle one complete JSON request and return a JSON response string."""
-    response = handle_request(text)
-    response.pop("_downloadPath", None)
-    return json.dumps(response, ensure_ascii=False)
+def handle_download_task(event: "TaskEvent") -> dict[str, str]:
+    try:
+        request = json.loads(event.request_text)
+    except json.JSONDecodeError:
+        return {"message": "invalid json", "tasks": []}
 
+    username = str(request.get("username") or "").strip()
+    task_name = str(request.get("taskName") or "").strip()
+    tasks = sql_get_user_all_task(username) if username else []
+    if not username or not task_name:
+        print(f"[结果下载失败] invalid request: {event.request_text}")
+        return {"message": "invalid request", "tasks": tasks}
 
-def handle_download_task(event: Any) -> None:
-    """Handle one download task event."""
-    print(f"[结果下载任务] {event.client_id}: {event.download_path}")
+    response = get_download_path(username, task_name)
+    message, _, download_path = response.partition("|")
+    if not download_path:
+        print(f"[结果下载失败] {message or 'download path does not exist.'}")
+        return {"message": message or "download path does not exist.", "tasks": tasks}
+
+    print(f"[结果下载开始] {event.client_id}: {download_path}")
     sock = event.client.socket
     old_timeout = sock.gettimeout()
     try:
         sock.setblocking(True)
         with sock.makefile("wb", buffering=DOWNLOAD_CHUNK_SIZE) as writer, tarfile.open(fileobj=writer, mode="w|") as tar:
-            for root, _, filenames in os.walk(event.download_path):
+            for root, _, filenames in os.walk(download_path):
                 for filename in filenames:
                     file_path = os.path.join(root, filename)
-                    arcname = os.path.relpath(file_path, event.download_path)
+                    arcname = os.path.relpath(file_path, download_path)
                     try:
                         tar.add(file_path, arcname=arcname, recursive=False)
                     except FileNotFoundError:
                         print(f"[结果下载跳过] file disappeared: {file_path}")
-        print(f"[结果下载完成] {event.client_id}: {event.download_path}")
+        print(f"[结果下载完成] {event.client_id}: {download_path}")
+        return {"message": message, "tasks": tasks}
     finally:
         try:
             sock.settimeout(old_timeout)

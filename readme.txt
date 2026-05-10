@@ -15,7 +15,7 @@ structure：
 │  2. accept 客户端连接                                                
 │  3. selector/epoll 管理 socket 事件，建立链接 / 响应任务              
 │  4. 维护长连接 idle timeout                                           
-│  5. 生成 TrainTaskEvent，交给线程池                                   
+│  5. 生成 TaskEvent，交给线程池                                   
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │ submit_lite(event)
                                 ▼
@@ -23,7 +23,7 @@ structure：
 │                         thread_pool.py                              
 │                  线程池，启动 4/8 个 worker 线程                                                                                   
 │  1. 维护任务队列，线程消费 train_task_queue                          
-│  2. worker 消费 TrainTaskEvent                                       
+│  2. worker 消费 TaskEvent                                       
 │  3. 调用业务函数 handle_request 处理请求                              
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │ 数据库管理用户任务信息 sql_xxx()
