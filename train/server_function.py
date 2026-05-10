@@ -93,9 +93,9 @@ def get_download_path(username: str, task_name: str) -> str:
 
     this_req = PaiRequest("", job_id)
     this_req.query_job()
-    if this_req.status not in {"Succeeded", "Failed", "Stopped"}:
-        message = f"{task_name}: is running, please wait until it finishes."
-        print(f"[任务运行中，无法下载] {message}")
+    if this_req.status != "Running":
+        message = f"{task_name}: is not running, please wait until it finishes."
+        print(f"[任务停止，容器不存在，无法下载] {message}")
         return f"{message}" + "|" + ""
     checkpoint_dir = CHECKPOINT_OUTPUT_DIR % (username, task_name)
     if not os.path.isdir(checkpoint_dir):
