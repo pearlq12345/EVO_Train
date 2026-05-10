@@ -27,6 +27,10 @@ class TaskEvent:
     request_text: str
     response_callback: Callable[[str], None] | None = None
     client: Any | None = None
+    timer_heap: Any | None = None
+
+    def refresh_client_expire_time(self) -> None:
+        self.timer_heap.refresh_client_expire_time(self.client)
 
 
 def log(message: str) -> None:

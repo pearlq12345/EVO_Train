@@ -9,6 +9,7 @@ import json
 import selectors
 import socket
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,33 +79,37 @@ class TimerHeap:
         self.idle_timeout = idle_timeout
         self._heap: list[tuple[float, int, Client]] = []
         self._counter = itertools.count()
+        self._lock = threading.Lock()
 
     def refresh_client_expire_time(self, client: Client) -> None:
         """Refresh one client's idle deadline and push it into the timer heap."""
-        client.last_active = time.monotonic()
-        client.idle_deadline = client.last_active + self.idle_timeout
-        heapq.heappush(self._heap, (client.idle_deadline, next(self._counter), client))
+        with self._lock:
+            client.last_active = time.monotonic()
+            client.idle_deadline = client.last_active + self.idle_timeout
+            heapq.heappush(self._heap, (client.idle_deadline, next(self._counter), client))
 
     def get_first_expire_time(self) -> float | None:
         """Return how long selector.select should wait before the next timeout."""
-        self._drop_stale_entries()
-        if not self._heap:
-            return None
-        deadline, _, _ = self._heap[0]
-        return max(0.0, deadline - time.monotonic())
+        with self._lock:
+            self._drop_stale_entries()
+            if not self._heap:
+                return None
+            deadline, _, _ = self._heap[0]
+            return max(0.0, deadline - time.monotonic())
 
     def pop_expired_clients(self) -> list[Client]:
         """Pop and return clients whose active idle deadlines have expired."""
         expired_clients: list[Client] = []
         now = time.monotonic()
-        while self._heap:
-            deadline, _, client = self._heap[0]
-            if deadline > now:
-                break
-            heapq.heappop(self._heap)
-            if client.closed or deadline != client.idle_deadline:
-                continue
-            expired_clients.append(client)
+        with self._lock:
+            while self._heap:
+                deadline, _, client = self._heap[0]
+                if deadline > now:
+                    break
+                heapq.heappop(self._heap)
+                if client.closed or deadline != client.idle_deadline:
+                    continue
+                expired_clients.append(client)
         return expired_clients
 
     def _drop_stale_entries(self) -> None:
@@ -226,6 +231,7 @@ def read_client(
         request_text=request_text,
         response_callback=None,
         client=client,
+        timer_heap=timer_heap,
     )
 
 
@@ -266,11 +272,10 @@ def serve(args: argparse.Namespace, pool: ThreadPool) -> None:
                     event = read_client(selector, key.data, args.recv_bytes, args.encoding, timer_heap) 
                     # 这里刷新连接的过期时间，所以不会出现连接业务在处理的时候连接被杀掉的情况。
                     if event is not None:
+                        event.response_callback = make_response_callback(selector, key.data, args.encoding)
                         if is_download_task(event.request_text):
-                            event.response_callback = None
                             pool.submit_download(event)
                         else:
-                            event.response_callback = make_response_callback(selector, key.data, args.encoding)
                             pool.submit_lite(event)
             for expired_client in timer_heap.pop_expired_clients(): ## 这里处理过期链接
                 unregister_and_close(selector, expired_client, "idle timeout")

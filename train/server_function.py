@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import tarfile
+import time
 from typing import Any, TYPE_CHECKING
 
 from sql_lite.sql_pack import sql_add_user_task, sql_delete_user_task, sql_get_user_all_task, sql_get_user_jobid
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
+DOWNLOAD_TIMER_REFRESH_SECONDS = 60
 
 
 def _start_training(request: dict[str, Any], username: str, task_name: str, tasks: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -163,6 +165,8 @@ def handle_download_task(event: "TaskEvent") -> dict[str, str]:
     print(f"[结果下载开始] {event.client_id}: {download_path}")
     sock = event.client.socket
     old_timeout = sock.gettimeout()
+    event.refresh_client_expire_time()
+    last_refresh_time = time.monotonic()
     try:
         sock.setblocking(True)
         with sock.makefile("wb", buffering=DOWNLOAD_CHUNK_SIZE) as writer, tarfile.open(fileobj=writer, mode="w|") as tar:
@@ -174,9 +178,14 @@ def handle_download_task(event: "TaskEvent") -> dict[str, str]:
                         tar.add(file_path, arcname=arcname, recursive=False)
                     except FileNotFoundError:
                         print(f"[结果下载跳过] file disappeared: {file_path}")
+                    delta_T = time.monotonic() - last_refresh_time
+                    if delta_T >= DOWNLOAD_TIMER_REFRESH_SECONDS:
+                        event.refresh_client_expire_time()
+                        last_refresh_time = time.monotonic()
         print(f"[结果下载完成] {event.client_id}: {download_path}")
         return {"message": message, "tasks": tasks}
     finally:
+        event.refresh_client_expire_time()
         try:
             sock.settimeout(old_timeout)
         except OSError:
