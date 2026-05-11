@@ -17,6 +17,14 @@ Load data from Alibaba Cloud OSS to a CPFS directory.
 # -endpoint: Designate network access entry for OSS. It can be find in .env
 # -job: the number of process to copy data
 # -update: If the target directory already contains a file with the same name and it is up-to-date, skip repeated downloading.
+
+# python3 load_oss_to_cpfs.py \
+#   --oss 'oss://evo-data/model_result/' \
+#   --cpfs /mnt/usrresult/ \
+#   --endpoint https://oss-cn-hangzhou-internal.aliyuncs.com \
+#   --jobs 32 \
+#   --update
+
 from __future__ import annotations
 import argparse
 import os

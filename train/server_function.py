@@ -28,14 +28,35 @@ DOWNLOAD_CHUNK_SIZE = 64 * 1024
 DOWNLOAD_TIMER_REFRESH_SECONDS = 60
 
 
-def _debug_ls_path(path: str) -> None:
-    command = ["ls", "-lah", path]
+def _run_debug_command(command: list[str]) -> None:
     print(f"[checkpoint不存在-debug] $ {' '.join(command)}")
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.stdout:
         print(result.stdout.rstrip())
     if result.stderr:
         print(result.stderr.rstrip())
+
+
+def _debug_missing_checkpoint_path(path: str) -> None:
+    parent_paths = [
+        "/mnt",
+        "/mnt/usrresult",
+        os.path.dirname(os.path.dirname(path)),
+        os.path.dirname(path),
+        path,
+    ]
+    print(f"[checkpoint不存在-debug] pid={os.getpid()} cwd={os.getcwd()}")
+    for command in [
+        ["hostname"],
+        ["id"],
+        ["readlink", "/proc/self/ns/mnt"],
+        ["cat", "/proc/self/cgroup"],
+        ["df", "-hT", "/mnt"],
+    ]:
+        _run_debug_command(command)
+    for parent_path in dict.fromkeys(parent_paths):
+        _run_debug_command(["ls", "-lah", parent_path])
+    _run_debug_command(["mount"])
 
 
 def _start_training(request: dict[str, Any], username: str, task_name: str, tasks: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -112,7 +133,7 @@ def get_download_path(username: str, task_name: str) -> str:
     if not os.path.isdir(checkpoint_dir):
         message = f"{task_name}: download failed, checkpoint does not exist."
         print(f"[checkpoint不存在] {checkpoint_dir}")
-        _debug_ls_path(checkpoint_dir)
+        _debug_missing_checkpoint_path(checkpoint_dir)
         return f"{message}" + "|" + ""
 
     if not any(filenames for _, _, filenames in os.walk(checkpoint_dir)):
