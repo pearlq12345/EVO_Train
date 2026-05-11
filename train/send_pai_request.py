@@ -27,7 +27,7 @@ DEFAULT_ROUTE = "eth1"
 DEFAULT_DATA_SOURCES = [
     CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
     CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"), # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理
-    CreateJobRequestDataSources(data_source_id="d-0dj8202laff1rt7s00", mount_path="/usrresult/"), 
+    CreateJobRequestDataSources(data_source_id="d-0dj8202laff1rt7s00", mount_path="/usrresult/", mount_access="RW"), 
     # CreateJobRequestDataSources(uri="nas://001vtgf4opoobb8u5gh.cn-hangzhou/", mount_path="/mnt/usrresult", mount_access="RW")
 ]
 
