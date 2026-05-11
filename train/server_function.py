@@ -22,7 +22,7 @@ from train.user_param import UserTrainCmd
 if TYPE_CHECKING:
     from thread_pool.thread_pool import TaskEvent
 
-TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
+TASK_OUTPUT_DIR = "/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 DOWNLOAD_TIMER_REFRESH_SECONDS = 60
@@ -40,7 +40,7 @@ def _run_debug_command(command: list[str]) -> None:
 def _debug_missing_checkpoint_path(path: str) -> None:
     parent_paths = [
         "/mnt",
-        "/mnt/usrresult",
+        "/usrresult",
         os.path.dirname(os.path.dirname(path)),
         os.path.dirname(path),
         path,
@@ -51,7 +51,7 @@ def _debug_missing_checkpoint_path(path: str) -> None:
         ["id"],
         ["readlink", "/proc/self/ns/mnt"],
         ["cat", "/proc/self/cgroup"],
-        ["df", "-hT", "/mnt"],
+        ["df", "-hT", "/usrresult"],
     ]:
         _run_debug_command(command)
     for parent_path in dict.fromkeys(parent_paths):

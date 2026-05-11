@@ -13,7 +13,7 @@ class UserTrainCmd:
     DEFAULT_POLICY_TYPE = "act"
     POLICY_PUSH_TO_HUB = "false"
     POLICY_REPO_ID = "local/libero_10_no_noops_1.0.0_lerobot"
-    OUTPUT_DIR = "/mnt/usrresult/%s/%s/checkpoint" ## username task_name
+    OUTPUT_DIR = "/usrresult/%s/%s/checkpoint" ## username task_name
     POLICY_DEVICE = "cuda"
     POLICY_PRETRAINED_BACKBONE_WEIGHTS = "null"
 
