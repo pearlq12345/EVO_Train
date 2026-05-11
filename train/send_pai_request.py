@@ -3,7 +3,7 @@
 from __future__ import annotations
 import os
 from alibabacloud_pai_dlc20201203.client import Client
-from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, GetWebTerminalRequest, JobSpec, ResourceConfig
+from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, GetWebTerminalRequest, JobSpec, ResourceConfig, StopJobRequest
 from alibabacloud_tea_openapi.models import Config
 
 DEFAULT_REGION = "cn-hangzhou"
@@ -104,7 +104,7 @@ class PaiRequest:
         print("开始实时跟踪任务状态...\n")
 
     def stop_job(self) -> None:
-        self.client.stop_job(self.job_id)
+        self.client.stop_job(self.job_id, StopJobRequest())
         print(f"任务停止请求已发送！Job ID: {self.job_id}")
 
     def query_job(self) -> str:
