@@ -27,7 +27,7 @@ DEFAULT_ROUTE = "eth1"
 DEFAULT_DATA_SOURCES = [
     CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
     CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"), # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理
-    CreateJobRequestDataSources(data_source_id="d-y9anx8llqk63q4hg1k", mount_path="/mnt/usrresult/"), # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理
+    CreateJobRequestDataSources(uri="oss://evo-model-result.oss-cn-hangzhou-internal.aliyuncs.com/model-result/", mount_path="/mnt/usrresult/", mount_access="RW")
 ]
 # status 的取值
 # {
