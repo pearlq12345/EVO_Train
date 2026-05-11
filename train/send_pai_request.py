@@ -21,14 +21,19 @@ DEFAULT_WORKERS = 1
 DEFAULT_VPC_ID = "vpc-bp1txl55oqch56uhbpc43"
 DEFAULT_SWITCH_ID = "vsw-bp14hh8tnognnao2f79n2"
 DEFAULT_SECURITY_GROUP_ID = "sg-bp171lhsibv9dwe0uia7"
+DEFAULT_EXTENDED_CIDRS = ["172.19.0.0/16"]
 DEFAULT_PRIORITY = 9
 DEFAULT_ROUTE = "eth1"
 
 DEFAULT_DATA_SOURCES = [
     CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
     CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"), # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理
-    CreateJobRequestDataSources(uri="nas://001vtgf4opoobb8u5gh.cn-hangzhou/", mount_path="/usrresult/", mount_access="RW")
-    # CreateJobRequestDataSources(data_source_id="d-0dj8202laff1rt7s00", mount_path="/usrresult/", mount_access="RW"),  ## 采用数据集方式挂载nas 只能是只读的。
+    CreateJobRequestDataSources(
+        uri="nas://001vtgf4opoobb8u5gh-vfp55.cn-hangzhou.nas.aliyuncs.com/",
+        mount_path="/usrresult/",
+        mount_access="RW",
+    ), # 最小实验：直接挂载 NAS mount target，验证 PAI 容器内 /usrresult 是否可写
+    # CreateJobRequestDataSources(data_source_id="d-0dj8202laff1rt7s00", mount_path="/usrresult/", mount_access="RW"),  ## 采用数据集方式挂载nas ，发现只读，无法写
     # CreateJobRequestDataSources(uri="nas://001vtgf4opoobb8u5gh.cn-hangzhou/", mount_path="/mnt/usrresult", mount_access="RW")
 ]
 #    如果想要将oss挂载到pai容器中，则执行以下命令
@@ -93,6 +98,7 @@ class PaiRequest:
                 vpc_id=DEFAULT_VPC_ID,
                 switch_id=DEFAULT_SWITCH_ID,
                 security_group_id=DEFAULT_SECURITY_GROUP_ID,
+                extended_cidrs=DEFAULT_EXTENDED_CIDRS,
                 default_route=DEFAULT_ROUTE,
             ),
         )
