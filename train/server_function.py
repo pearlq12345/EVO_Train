@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tarfile
 import time
 from typing import Any, TYPE_CHECKING
@@ -25,6 +26,16 @@ TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 DOWNLOAD_TIMER_REFRESH_SECONDS = 60
+
+
+def _debug_ls_path(path: str) -> None:
+    command = ["ls", "-lah", path]
+    print(f"[checkpoint不存在-debug] $ {' '.join(command)}")
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.stdout:
+        print(result.stdout.rstrip())
+    if result.stderr:
+        print(result.stderr.rstrip())
 
 
 def _start_training(request: dict[str, Any], username: str, task_name: str, tasks: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -101,6 +112,7 @@ def get_download_path(username: str, task_name: str) -> str:
     if not os.path.isdir(checkpoint_dir):
         message = f"{task_name}: download failed, checkpoint does not exist."
         print(f"[checkpoint不存在] {checkpoint_dir}")
+        _debug_ls_path(checkpoint_dir)
         return f"{message}" + "|" + ""
 
     if not any(filenames for _, _, filenames in os.walk(checkpoint_dir)):
