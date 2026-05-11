@@ -100,7 +100,7 @@ def get_download_path(username: str, task_name: str) -> str:
     checkpoint_dir = CHECKPOINT_OUTPUT_DIR % (username, task_name)
     if not os.path.isdir(checkpoint_dir):
         message = f"{task_name}: download failed, checkpoint does not exist."
-        print(f"[checkpoint不存在] {message}")
+        print(f"[checkpoint不存在] {checkpoint_dir}")
         return f"{message}" + "|" + ""
 
     if not any(filenames for _, _, filenames in os.walk(checkpoint_dir)):
