@@ -22,7 +22,7 @@ from train.user_param import UserTrainCmd
 if TYPE_CHECKING:
     from thread_pool.thread_pool import TaskEvent
 
-TASK_OUTPUT_DIR = "/usrresult/%s/%s" ## username task_name
+TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 DOWNLOAD_TIMER_REFRESH_SECONDS = 60
@@ -40,7 +40,7 @@ def _run_debug_command(command: list[str]) -> None:
 def _debug_missing_checkpoint_path(path: str) -> None:
     parent_paths = [
         "/mnt",
-        "/usrresult",
+        "/mnt/usrresult",
         os.path.dirname(os.path.dirname(path)),
         os.path.dirname(path),
         path,
@@ -51,7 +51,7 @@ def _debug_missing_checkpoint_path(path: str) -> None:
         ["id"],
         ["readlink", "/proc/self/ns/mnt"],
         ["cat", "/proc/self/cgroup"],
-        ["df", "-hT", "/usrresult"],
+        ["df", "-hT", "/mnt/usrresult"],
     ]:
         _run_debug_command(command)
     for parent_path in dict.fromkeys(parent_paths):
@@ -118,17 +118,17 @@ def _delete_task(username: str, task_name: str) -> tuple[str, list[dict[str, str
 
 
 def get_download_path(username: str, task_name: str) -> str:
-    job_id = sql_get_user_jobid(username, task_name)
-    if not job_id:
-        print("job_id不存在")
-        return "job_id does not exist." + "|" + ""
+    # job_id = sql_get_user_jobid(username, task_name)
+    # if not job_id:
+    #     print("job_id不存在")
+    #     return "job_id does not exist." + "|" + ""
 
-    this_req = PaiRequest("", job_id)
-    this_req.query_job()
-    if this_req.status != "Running":
-        message = f"{task_name}: is not running, please wait until it finishes."
-        print(f"[任务停止，容器不存在，无法下载] {message}")
-        return f"{message}" + "|" + ""
+    # this_req = PaiRequest("", job_id)
+    # this_req.query_job()
+    # if this_req.status != "Running":
+    #     message = f"{task_name}: is not running, please wait until it finishes."
+    #     print(f"[任务停止，容器不存在，无法下载] {message}")
+    #     return f"{message}" + "|" + ""
     checkpoint_dir = CHECKPOINT_OUTPUT_DIR % (username, task_name)
     if not os.path.isdir(checkpoint_dir):
         message = f"{task_name}: download failed, checkpoint does not exist."
