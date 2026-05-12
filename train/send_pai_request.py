@@ -24,14 +24,25 @@ DEFAULT_SECURITY_GROUP_ID = "sg-bp171lhsibv9dwe0uia7"
 DEFAULT_EXTENDED_CIDRS = ["172.19.0.0/16"]
 DEFAULT_PRIORITY = 9
 DEFAULT_ROUTE = "eth1"
+
+OSS_CODE_DATA_SOURCE_ID = "d-hzpwiw5qvtyy7887oe" # 存放代码的OSS数据集ID
+PAI_MOUNT_PATH_OF_CODE = "/mnt/code/" # 代码OSS数据集会被mount在PAI容器的哪个位置
+# 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理，直接挂载到pai的/mnt/code路径下
+
+NAS_MODEL_RESULT_URI = "nas://001vtgf4opoobb8u5gh-vfp55.cn-hangzhou.nas.aliyuncs.com/" # 存放用户训练结果
+PAI_MOUNT_PATH_OF_MODEL_RESULT = "/usrresult/" # pai容器下，用户训练结果存放的位置。也是nas挂载的位置。格式 /usrresult/usrname/taskname/
+ECS_MOUNT_PATH_OF_MODEL_RESULT = "/mnt/usrresult" # NAS挂载在ECS的哪个路径下。
+# pai 的/usrresult/ 和 ecs 的/mnt/usrresult 挂载的是同一个nas，在pai的/usrresult/usrname/taskname/下生成文件，
+# 对应就在 ecs 的"/mnt/usrresult/%s/%s/checkpoint下生成文件
+# 当时考虑用nas，是因为nas才支持像真正文件系统一样来读写，而oss虽然也能实现读写，但是无法进行链接操作（lerobot依赖链接操作生成训练结果。）
+OSS_USR_DATASET_URI = "oss://evo-data.oss-cn-hangzhou-internal.aliyuncs.com/all_usr_dataset/%s/%s" 
+PAI_MOUNT_PATH_OF_USR_DATASET = "/mnt/pai/data/" # 用户指定（或者默认）数据集在pai容器下的挂载路径
+ECS_MOUNT_PATH_OF_USR_DATASET = "/home/evomind/usrdata/" # 用户的数据集挂载在ECS的哪个路径下，具体是格式 /home/evomind/usrdata/usrname/datasetname/
+DEFAULT_USR_DATASET_ID = "d-xfobl8zdj3cqdrleqo" # 如果用户没有指定数据集，则使用默认数据集进行训练
+# evo-data这个bucket下面的/all_usr_dataset/usrname/datasetname 是用户自己的数据集，所以在拉起pai训练任务的时候，需要将桶的某个路径同时挂载到pai 和 ecs
 DEFAULT_DATA_SOURCES = [
-    CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"),
-    # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理，直接挂载到pai的/mnt/code路径下
-    CreateJobRequestDataSources(uri="nas://001vtgf4opoobb8u5gh-vfp55.cn-hangzhou.nas.aliyuncs.com/", mount_path="/usrresult/", mount_access="RW"),
-    # 训练结果需要同时挂载在ecs 和 pai 平台上，这里采用nas的方式来挂载训练结果，当用户在写结果的时候，
-    # pai 的/usrresult/ 和 ecs 的/mnt/usrresult 挂载的是同一个路径
-    # 用户在训练过程中，在pai的/usrresult/%s/%s/checkpoint下生成文件，
-    # 对应就在 ecs 的"/mnt/usrresult/%s/%s/checkpoint下生成文件
+    CreateJobRequestDataSources(data_source_id=OSS_CODE_DATA_SOURCE_ID, mount_path=PAI_MOUNT_PATH_OF_CODE),
+    CreateJobRequestDataSources(uri=NAS_MODEL_RESULT_URI, mount_path=PAI_MOUNT_PATH_OF_MODEL_RESULT, mount_access="RW"),
 ]
 # DEFAULT_DATA_SOURCES = [
 #     CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
@@ -88,16 +99,15 @@ class PaiRequest:
                 memory=DEFAULT_MEMORY, shared_memory=DEFAULT_SHARED_MEMORY),
         )
         # dataset_oss_url = "oss://evo-model-result.oss-cn-hangzhou-internal.aliyuncs.com/all_usr_dataset"
-        dataset_oss_url = "oss://evo-data.oss-cn-hangzhou-internal.aliyuncs.com/all_usr_dataset"
         data_sources = list(DEFAULT_DATA_SOURCES)
         # 如果用户有指定自己的数据集，则将指定的oss路径挂载pai容器的/mnt/pai/data路径下，否则挂载一个默认的数据集到该路径下
         # 对于后端，则是把evo-data/all_usr_dataset/都给挂载到了/home/evomind/usrdata/目录下。
         if datasetname != "":
-            user_dataset_oss_url = f"{dataset_oss_url}/{usrname}/{datasetname}/"
-            data_sources.append(CreateJobRequestDataSources(uri=user_dataset_oss_url, mount_path="/mnt/pai/data/"))
+            user_dataset_oss_url = (OSS_USR_DATASET_URI % (usrname, datasetname)) + "/"
+            data_sources.append(CreateJobRequestDataSources(uri=user_dataset_oss_url, mount_path=PAI_MOUNT_PATH_OF_USR_DATASET))
             print(user_dataset_oss_url)
         else:
-            data_sources.append(CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"))
+            data_sources.append(CreateJobRequestDataSources(data_source_id=DEFAULT_USR_DATASET_ID,  mount_path=PAI_MOUNT_PATH_OF_USR_DATASET))
                  
     # 如果用户没有指定数据集，就用默认的数据密
     # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
