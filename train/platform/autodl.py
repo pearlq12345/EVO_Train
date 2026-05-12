@@ -7,6 +7,7 @@ import shlex
 import time
 from pathlib import Path
 from typing import Any
+from urllib import parse as urlparse
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -32,12 +33,22 @@ class AutoDLApiClient:
         self.base_url = (base_url or os.environ.get("AUTODL_API_BASE") or DEFAULT_API_BASE_URL).rstrip("/")
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = None if body is None else json.dumps(body).encode("utf-8")
+        method = method.upper()
+        url = f"{self.base_url}{path}"
+        payload = None
+        headers = {"Authorization": self.token}
+        if method == "GET" and body:
+            url = f"{url}?{urlparse.urlencode(body)}"
+        elif method == "POST" and body is None:
+            payload = b""
+        elif body is not None:
+            payload = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
         req = urlrequest.Request(
-            f"{self.base_url}{path}",
+            url,
             data=payload,
             method=method,
-            headers={"Authorization": self.token, "Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with urlrequest.urlopen(req, timeout=30) as response:
