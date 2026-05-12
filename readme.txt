@@ -164,12 +164,15 @@ workflow / recipe：
      - 用户不需要知道云厂商 token、SSH 地址、端口、密钥，也不需要自己拼复杂 command
 
   2. 当前内置 recipe
+     - custom_project
+       params: repoUrl / branch / setupCommand / dataCommand / trainCommand / evalCommand / artifactPath
      - evf_metaworld
        params: envName / epochs / batchSize / learningRate / seed / evalEpisodes / saveVideo
      - evf_libero
        params: suite / taskId / epochs / batchSize / learningRate / seed / evalEpisodes / saveVideo
      - recipe 会生成统一 stages：
-       prepare_data -> train -> evaluate -> collect_artifacts
+       自定义项目：prepare_code -> setup_env -> prepare_data -> train -> evaluate -> collect_artifacts
+       预置具身任务：prepare_data -> train -> evaluate -> collect_artifacts
        provider 仍执行单个 command，但 command 内部会打印 __EVO_STAGE_START__/__EVO_STAGE_DONE__，便于后续日志解析和状态展示。
 
   3. 推荐交互

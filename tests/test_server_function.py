@@ -401,6 +401,53 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertIn("--task-id 2", submitted_configs[0]["command"])
         self.assertTrue(submitted_configs[0]["autodl_managed"])
 
+    def test_custom_project_plan_keeps_general_training_simple(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "custom_project",
+                    "params": {
+                        "repoUrl": "https://github.com/example/project.git",
+                        "trainCommand": "python train.py --config configs/demo.yaml",
+                        "evalCommand": "python eval.py --ckpt outputs/latest.pt",
+                        "artifactPath": "/root/autodl-tmp/custom_project/outputs",
+                    },
+                    "provider": "autodl",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertEqual(response["plan"]["workflow"], "custom_project")
+        self.assertEqual(response["plan"]["missingFields"], [])
+        self.assertEqual(
+            [stage["name"] for stage in response["plan"]["stages"]],
+            ["prepare_code", "setup_env", "prepare_data", "train", "evaluate", "collect_artifacts"],
+        )
+        self.assertIn("git clone", response["plan"]["stages"][0]["command"])
+        self.assertIn("python train.py", response["plan"]["stages"][3]["command"])
+
+    def test_custom_project_requires_repo_and_train_command(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "custom_project",
+                    "params": {},
+                    "provider": "autodl",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertEqual(response["plan"]["missingFields"], ["repoUrl", "trainCommand"])
+        self.assertFalse(response["plan"]["readyToStart"])
+
     def test_billing_scan_stops_autodl_task_when_next_hour_cannot_be_frozen(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 1000)
         self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "autodl-run-2", 1000, "test setup"))

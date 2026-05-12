@@ -5,12 +5,13 @@ import re
 from typing import Any, Callable
 
 from .base import WorkflowPlan
-from . import evf_libero, evf_metaworld
+from . import custom_project, evf_libero, evf_metaworld
 
 
 WorkflowBuilder = Callable[[dict[str, Any], dict[str, Any]], WorkflowPlan]
 
 WORKFLOWS: dict[str, WorkflowBuilder] = {
+    custom_project.WORKFLOW_NAME: custom_project.build_plan,
     evf_metaworld.WORKFLOW_NAME: evf_metaworld.build_plan,
     evf_libero.WORKFLOW_NAME: evf_libero.build_plan,
 }
@@ -37,6 +38,8 @@ def infer_workflow(request: dict[str, Any], params: dict[str, Any]) -> str:
     if workflow:
         return workflow
     message = str(request.get("message") or request.get("prompt") or "").lower()
+    if "repo" in message or "github" in message or "自定义" in message or "自己的项目" in message:
+        return custom_project.WORKFLOW_NAME
     if "libero" in message:
         return evf_libero.WORKFLOW_NAME
     return evf_metaworld.WORKFLOW_NAME
