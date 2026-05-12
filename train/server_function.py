@@ -26,6 +26,8 @@ TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 DOWNLOAD_TIMER_REFRESH_SECONDS = 60
+TAR_BLOCK_SIZE = 512
+TAR_RECORD_SIZE = TAR_BLOCK_SIZE * 20
 
 
 def _run_debug_command(command: list[str]) -> None:
@@ -145,6 +147,40 @@ def get_download_path(username: str, task_name: str) -> str:
     print(f"[结果下载入队] {message}")
     return f"{message}" + "|" + checkpoint_dir
 
+
+def _tar_stream_size(path: str) -> tuple[int, int, int]:
+    tar_size = 0
+    file_size = 0
+    file_count = 0
+    for root, _, filenames in os.walk(path):
+        for filename in filenames:
+            file_path = os.path.join(root, filename)
+            try:
+                size = os.path.getsize(file_path)
+            except FileNotFoundError:
+                continue
+            file_count += 1
+            file_size += size
+            tar_size += TAR_BLOCK_SIZE
+            tar_size += ((size + TAR_BLOCK_SIZE - 1) // TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE
+    tar_size += TAR_BLOCK_SIZE * 2
+    tar_size += (TAR_RECORD_SIZE - (tar_size % TAR_RECORD_SIZE)) % TAR_RECORD_SIZE
+    return tar_size, file_size, file_count
+
+
+def get_download_size(username: str, task_name: str) -> dict[str, Any]:
+    response = get_download_path(username, task_name)
+    message, _, download_path = response.partition("|")
+    if not download_path:
+        return {"message": message or "download path does not exist.", "downloadSize": 0, "fileSize": 0, "fileCount": 0}
+    tar_size, file_size, file_count = _tar_stream_size(download_path)
+    return {
+        "message": "download size ready",
+        "downloadSize": tar_size,
+        "fileSize": file_size,
+        "fileCount": file_count,
+    }
+
 # 这里设计的时候先考虑用阻塞的方案来解决：每次任务起来以后，只有等到任务创建成功/失败 任务删除成功/失败的时候才会返回。
 # 这样设计一方面是考虑当前并发-资源的关系很协调，另一方面是考虑用户体验，可以持续的看到当前创建任务过程的进展。
 # 任务创建的过程大概会持续60s左右，主要是镜像比较大。
@@ -171,6 +207,10 @@ def handle_request(text: str) -> dict[str, Any]:
         message, tasks = _stop_training(username, task_name)
     elif action == "删除任务":
         message, tasks = _delete_task(username, task_name)
+    elif action == "结果大小":
+        response = get_download_size(username, task_name)
+        response["tasks"] = tasks
+        return response
     else:
         message = "invalid action"
     return {"message": message, "tasks": tasks}
