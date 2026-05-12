@@ -116,6 +116,13 @@ def _request_bool(request: dict[str, Any], key: str, *, default: bool = False) -
     return lowered in {"1", "true", "yes", "y", "on"}
 
 
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _request_mounts(request: dict[str, Any]) -> list[str] | None:
     mounts = request.get("mount")
     if mounts is None or mounts == "":
@@ -204,6 +211,11 @@ def _build_job_config(request: dict[str, Any], task_name: str, provider: str) ->
 def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     if sql_get_user_task(username, task_name) is not None:
         return "create task failed", sql_get_user_all_task(username)
+    if request.get("command") and not request.get("workflow") and not _env_bool("EVO_TRAIN_ALLOW_RAW_COMMAND"):
+        return (
+            "raw command is disabled; submit workflow + params or set EVO_TRAIN_ALLOW_RAW_COMMAND=true",
+            sql_get_user_all_task(username),
+        )
     try:
         request = materialize_training_request(request)
     except (ValueError, TypeError) as exc:

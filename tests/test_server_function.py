@@ -245,7 +245,10 @@ class ServerFunctionTests(unittest.TestCase):
         sql_pack.sql_set_user_balance("pearl", 3000)
         platform = SimpleNamespace(submit=lambda job_config: "autodl-job-1")
 
-        with patch.object(server_function, "get_platform", return_value=platform) as mocked_factory:
+        with (
+            patch.dict("os.environ", {"EVO_TRAIN_ALLOW_RAW_COMMAND": "true"}, clear=False),
+            patch.object(server_function, "get_platform", return_value=platform) as mocked_factory,
+        ):
             response = server_function.handle_request(
                 json.dumps(
                     {
@@ -268,6 +271,28 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(task["jobId"], "autodl-job-1")
         self.assertEqual(task["hourlyPriceCents"], "1200")
         self.assertEqual(response["wallet"]["frozenCents"], "1200")
+
+    def test_raw_command_is_disabled_unless_explicitly_allowed(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 3000)
+
+        with patch.dict("os.environ", {}, clear=True):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "taskName": "raw-command",
+                        "action": "开始训练",
+                        "provider": "autodl",
+                        "command": "python train.py",
+                        "workdir": "/root/autodl-tmp/evf",
+                        "hourlyPriceCents": 1200,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertIn("raw command is disabled", response["message"])
+        self.assertEqual(sql_pack.sql_get_wallet("pearl")["frozenCents"], "0")
 
     def test_ai_plan_generates_workflow_recipe_for_roboclaw(self) -> None:
         response = server_function.handle_request(

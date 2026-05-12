@@ -45,6 +45,7 @@ current request / response notes：
   - 如果部署到公网，建议设置鉴权环境变量：
     export EVO_TRAIN_CLIENT_TOKEN='<roboclaw-client-token>'
     export EVO_TRAIN_ADMIN_TOKEN='<admin-token>'
+    export EVO_TRAIN_ALLOW_RAW_COMMAND=false
     用户侧请求带 apiToken/token；管理员请求带 adminToken/apiToken/token。
     不设置这些环境变量时保持本地开发兼容，不强制鉴权。
 
@@ -85,7 +86,8 @@ current request / response notes：
      - 当前支持 provider=aliyun / provider=autodl
      - 请求里可带 datasetPath / checkpointPath / epochs / checkpointFrequency / gpuCount
        以及 image / ecsSpec / workspaceId 等阿里云参数
-     - AutoDL 可直接传 command / workdir：
+     - 生产推荐走 workflow/params；裸 command 只用于高级调试，需要设置 EVO_TRAIN_ALLOW_RAW_COMMAND=true
+     - AutoDL 高级调试可直接传 command / workdir：
        {"username":"u","taskName":"eval-1","action":"开始训练","provider":"autodl","command":"python eval.py --suite libero_object_task","workdir":"/root/autodl-tmp/evf"}
      - AutoDL 托管实例模式可传：
        {"username":"u","taskName":"eval-1","action":"开始训练","provider":"autodl","command":"python eval.py","workdir":"/root/autodl-tmp/evf","autodlManaged":true,"autodlInstanceUuid":"pro-xxxx"}
