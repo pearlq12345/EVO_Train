@@ -66,7 +66,7 @@ def _list_user_dataset_dirs(username: str) -> list[str]:
     dataset_root = os.path.expanduser(USER_DATA_ROOT % username)
     try:
         return [
-            os.path.join(dataset_root, name)
+            name
             for name in sorted(os.listdir(dataset_root))
             if os.path.isdir(os.path.join(dataset_root, name))
         ]
