@@ -124,6 +124,21 @@ def sql_get_user_jobid(username: str, task_name: str) -> str | None:
     return row["job_id"] or None
 
 
+def sql_user_task_exists(username: str, task_name: str) -> bool:
+    """Return True when one user's task name already exists."""
+    with _connect() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM user_tasks
+            WHERE username = %s AND task_name = %s
+            LIMIT 1
+            """,
+            (username, task_name),
+        )
+        return cursor.fetchone() is not None
+
+
 def sql_add_user_task(username: str, task_name: str, job_id: str) -> bool:
     """Add one task and job ID for one user. Return False when either already exists."""
     pymysql, _ = _load_pymysql()

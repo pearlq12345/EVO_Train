@@ -24,12 +24,20 @@ DEFAULT_SECURITY_GROUP_ID = "sg-bp171lhsibv9dwe0uia7"
 DEFAULT_EXTENDED_CIDRS = ["172.19.0.0/16"]
 DEFAULT_PRIORITY = 9
 DEFAULT_ROUTE = "eth1"
-
 DEFAULT_DATA_SOURCES = [
-    CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
-    CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"), # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理
-    CreateJobRequestDataSources(uri="nas://001vtgf4opoobb8u5gh-vfp55.cn-hangzhou.nas.aliyuncs.com/", mount_path="/usrresult/", mount_access="RW")
+    CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"),
+    # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理，直接挂载到pai的/mnt/code路径下
+    CreateJobRequestDataSources(uri="nas://001vtgf4opoobb8u5gh-vfp55.cn-hangzhou.nas.aliyuncs.com/", mount_path="/usrresult/", mount_access="RW"),
+    # 训练结果需要同时挂载在ecs 和 pai 平台上，这里采用nas的方式来挂载训练结果，当用户在写结果的时候，
+    # pai 的/usrresult/ 和 ecs 的/mnt/usrresult 挂载的是同一个路径
+    # 用户在训练过程中，在pai的/usrresult/%s/%s/checkpoint下生成文件，
+    # 对应就在 ecs 的"/mnt/usrresult/%s/%s/checkpoint下生成文件
 ]
+# DEFAULT_DATA_SOURCES = [
+#     CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"), # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
+#     CreateJobRequestDataSources(data_source_id="d-hzpwiw5qvtyy7887oe", mount_path="/mnt/code/"), # 由于容器无法使用clone，所以暂时将代码也用数据集的方式进行管理
+#     CreateJobRequestDataSources(uri="nas://001vtgf4opoobb8u5gh-vfp55.cn-hangzhou.nas.aliyuncs.com/", mount_path="/usrresult/", mount_access="RW")
+# ]
 #    如果想要将oss挂载到pai容器中，则执行以下命令
 #    CreateJobRequestDataSources(uri="oss://evo-model-result.oss-cn-hangzhou-internal.aliyuncs.com/model-result/", mount_path="/mnt/usrresult/", mount_access="RW")
 #    采用数据集方式挂载nas ，发现只读，无法写
@@ -71,7 +79,7 @@ class PaiRequest:
             raise RuntimeError(f"Missing required environment variable: {name}")
         return value
 
-    def build_create_request(self) -> CreateJobRequest:
+    def build_create_request(self, usrname: str, datasetname: str = "") -> CreateJobRequest:
         job_spec = JobSpec(
             type=DEFAULT_ROLE,
             image=DEFAULT_IMAGE,
@@ -79,6 +87,18 @@ class PaiRequest:
             resource_config=ResourceConfig(cpu=DEFAULT_CPU, gpu=DEFAULT_GPU,
                 memory=DEFAULT_MEMORY, shared_memory=DEFAULT_SHARED_MEMORY),
         )
+        dataset_oss_url = "oss://evo-model-result.oss-cn-hangzhou-internal.aliyuncs.com/evo-data/"
+        data_sources = list(DEFAULT_DATA_SOURCES)
+        # 如果用户有指定自己的数据集，则将指定的oss路径挂载pai容器的/mnt/pai/data路径下，否则挂载一个默认的数据集到该路径下
+        # 对于后端，则是把evo-data/all_usr_dataset/都给挂载到了/usrdata目录下。
+        if datasetname != "":
+            user_dataset_oss_url = f"{dataset_oss_url}/{usrname}/{datasetname}/"
+            data_sources.append(CreateJobRequestDataSources(uri=user_dataset_oss_url, mount_path="/mnt/pai/data/"))
+        else:
+            data_sources.append(CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"))
+                 
+    # 如果用户没有指定数据集，就用默认的数据密
+    # 数据集的id，以及希望数据集挂载在拉起的容器的什么路径
 
         return CreateJobRequest(
             resource_id=DEFAULT_RESOURCE_ID,
@@ -86,7 +106,7 @@ class PaiRequest:
             display_name=DEFAULT_JOB_NAME,
             job_type=DEFAULT_JOB_TYPE,
             job_specs=[job_spec],
-            data_sources=DEFAULT_DATA_SOURCES,
+            data_sources=data_sources,
             user_command=self.user_cmd,
             priority=DEFAULT_PRIORITY,
             user_vpc=CreateJobRequestUserVpc(
@@ -97,8 +117,8 @@ class PaiRequest:
                 default_route=DEFAULT_ROUTE,
             ),
         )
-    def submit_job(self) -> None:
-        response = self.client.create_job(self.build_create_request())
+    def submit_job(self, usrname: str, datasetname: str) -> None:
+        response = self.client.create_job(self.build_create_request(usrname, datasetname))
         self.job_id = response.body.job_id
         print(f"任务提交成功！Job ID: {self.job_id}")
         print("开始实时跟踪任务状态...\n")

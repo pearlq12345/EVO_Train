@@ -15,7 +15,7 @@ import tarfile
 import time
 from typing import Any, TYPE_CHECKING
 
-from sql_lite.sql_pack import sql_add_user_task, sql_delete_user_task, sql_get_user_all_task, sql_get_user_jobid
+from sql_lite.sql_pack import sql_add_user_task, sql_delete_user_task, sql_get_user_all_task, sql_get_user_jobid, sql_user_task_exists
 from train.send_pai_request import PaiRequest
 from train.user_param import UserTrainCmd
 
@@ -77,14 +77,15 @@ def _list_user_dataset_dirs(username: str) -> list[str]:
         return []
 
 
-def _start_training(request: dict[str, Any], username: str, task_name: str, tasks: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
-    # TODO：应该先检查是否有同名任务存在，如果已经存在就返回错误
+def _start_training(request: dict[str, Any], username: str, task_name: str, datasetname: str) -> str:
+    if sql_user_task_exists(username, task_name):
+        return f"{task_name}: task already exists."
     user_cmd = UserTrainCmd(request).create_train_cmd(username, task_name)
     this_req = PaiRequest(user_cmd)
-    this_req.submit_job() ## TODO:没有做兜底逻辑
+    this_req.submit_job(username, datasetname) ## TODO:没有做兜底逻辑
     if sql_add_user_task(username, task_name, this_req.job_id):
         return "create task success", sql_get_user_all_task(username)
-    return "create task failed", tasks
+    return "create task failed"
 
 
 def _query_status(username: str, task_name: str) -> str:
@@ -273,13 +274,14 @@ def handle_request(text: str) -> dict[str, Any]:
     username = str(request.get("username") or "").strip()
     task_name = str(request.get("taskName") or "").strip()
     action = str(request.get("action") or "").strip()
+    dataset_name = str(request.get("datasetName") or "").strip()
     tasks = sql_get_user_all_task(username)
     if action == "任务同步":
         return {"message": "sync success", "tasks": tasks, "datasetDir": _list_user_dataset_dirs(username)}
     if not username or not task_name:
         return {"message": "invalid request", "tasks": tasks}
     if action == "开始训练":
-        message, tasks = _start_training(request, username, task_name, tasks)
+        message = _start_training(request, username, task_name, dataset_name)
     elif action == "查询状态":
         message = _query_status(username, task_name)
     elif action == "结束训练":
