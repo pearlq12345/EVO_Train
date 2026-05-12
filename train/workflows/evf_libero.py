@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from typing import Any
+
+from .base import WorkflowPlan, param_bool, param_float, param_int, param_string, quote_args
+
+
+WORKFLOW_NAME = "evf_libero"
+
+
+def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
+    suite = param_string(params, "suite", param_string(params, "taskSuite", "libero_object_task"))
+    task_id = param_int(params, "taskId", 0)
+    epochs = param_int(params, "epochs", 20)
+    batch_size = param_int(params, "batchSize", 16)
+    learning_rate = param_float(params, "learningRate", param_float(params, "lr", 1e-4))
+    seed = param_int(params, "seed", 42)
+    eval_episodes = param_int(params, "evalEpisodes", 10)
+    save_video = param_bool(params, "saveVideo", True)
+    workdir = param_string(params, "workdir", "/root/autodl-tmp/evf")
+    dataset_path = param_string(params, "datasetPath", f"/root/autodl-tmp/datasets/libero/{suite}")
+    checkpoint_path = param_string(params, "checkpointPath", f"/root/autodl-tmp/evo_train/runs/{suite}-{task_id}")
+    provider = str(request.get("provider") or params.get("provider") or "autodl")
+    gpu_spec = param_string(params, "gpuSpec", str(request.get("gpuSpec") or "default"))
+    hourly_price_cents = int(request.get("hourlyPriceCents") or params.get("hourlyPriceCents") or 1000)
+
+    command_parts = [
+        "python",
+        "train.py",
+        "--benchmark",
+        "libero",
+        "--suite",
+        suite,
+        "--task-id",
+        str(task_id),
+        "--dataset-path",
+        dataset_path,
+        "--epochs",
+        str(epochs),
+        "--batch-size",
+        str(batch_size),
+        "--lr",
+        str(learning_rate),
+        "--seed",
+        str(seed),
+        "--checkpoint-path",
+        checkpoint_path,
+        "--eval-episodes",
+        str(eval_episodes),
+    ]
+    if save_video:
+        command_parts.append("--save-video")
+
+    return WorkflowPlan(
+        workflow=WORKFLOW_NAME,
+        provider=provider,
+        params={
+            "suite": suite,
+            "taskId": task_id,
+            "epochs": epochs,
+            "batchSize": batch_size,
+            "learningRate": learning_rate,
+            "seed": seed,
+            "evalEpisodes": eval_episodes,
+            "saveVideo": save_video,
+        },
+        command=quote_args(command_parts),
+        workdir=workdir,
+        checkpoint_path=checkpoint_path,
+        dataset_path=dataset_path,
+        gpu_spec=gpu_spec,
+        hourly_price_cents=hourly_price_cents,
+        summary=f"LIBERO {suite} task {task_id}: train {epochs} epochs, then evaluate {eval_episodes} episodes.",
+    )

@@ -269,6 +269,63 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(task["hourlyPriceCents"], "1200")
         self.assertEqual(response["wallet"]["frozenCents"], "1200")
 
+    def test_ai_plan_generates_workflow_recipe_for_roboclaw(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "message": "我想在metaworld上跑pick-place，20个epoch，训练后评估10个episode",
+                    "provider": "autodl",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertEqual(response["plan"]["workflow"], "evf_metaworld")
+        self.assertEqual(response["plan"]["params"]["envName"], "pick-place-v2")
+        self.assertEqual(response["plan"]["params"]["epochs"], 20)
+        self.assertIn("--benchmark metaworld", response["plan"]["command"])
+        self.assertTrue(response["plan"]["needsConfirmation"])
+
+    def test_start_training_materializes_workflow_before_provider_submit(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 3000)
+        submitted_configs: list[dict[str, object]] = []
+
+        def submit(job_config: dict[str, object]) -> str:
+            submitted_configs.append(job_config)
+            return "workflow-job-1"
+
+        platform = SimpleNamespace(submit=submit)
+
+        with patch.object(server_function, "get_platform", return_value=platform):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "taskName": "workflow-run",
+                        "action": "开始训练",
+                        "provider": "autodl",
+                        "workflow": "evf_libero",
+                        "params": {
+                            "suite": "libero_object_task",
+                            "taskId": 2,
+                            "epochs": 5,
+                            "evalEpisodes": 3,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "create task success")
+        self.assertEqual(response["tasks"][0]["provider"], "autodl")
+        self.assertEqual(response["tasks"][0]["datasetPath"], "/root/autodl-tmp/datasets/libero/libero_object_task")
+        self.assertIn("--benchmark libero", submitted_configs[0]["command"])
+        self.assertIn("--task-id 2", submitted_configs[0]["command"])
+        self.assertTrue(submitted_configs[0]["autodl_managed"])
+
     def test_billing_scan_stops_autodl_task_when_next_hour_cannot_be_frozen(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 1000)
         self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "autodl-run-2", 1000, "test setup"))

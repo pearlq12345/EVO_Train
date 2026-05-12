@@ -33,6 +33,7 @@ from sql_lite.sql_pack import (
 from train import start_train
 from train.platform.autodl import AutoDLApiClient
 from train.platform.factory import get_platform, normalize_provider
+from train.workflows import build_training_plan, materialize_training_request
 
 
 TERMINAL_STATUSES = start_train.DONE_STATUSES | start_train.FAILED_STATUSES | {"STOPPED"}
@@ -45,7 +46,7 @@ TERMINAL_INSTANCE_STATUSES = {
     "Instance:not_found",
 }
 ADMIN_ACTIONS = {"管理员充值", "价格设置", "平台余额查询"}
-USER_ACTIONS = {"余额查询", "账单查询", "任务同步", "开始训练", "结束训练", "删除任务", "结果下载"}
+USER_ACTIONS = {"余额查询", "账单查询", "任务同步", "开始训练", "结束训练", "删除任务", "结果下载", "AI配置训练"}
 
 
 def _is_terminal_status(status: str) -> bool:
@@ -203,6 +204,10 @@ def _build_job_config(request: dict[str, Any], task_name: str, provider: str) ->
 def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     if sql_get_user_task(username, task_name) is not None:
         return "create task failed", sql_get_user_all_task(username)
+    try:
+        request = materialize_training_request(request)
+    except (ValueError, TypeError) as exc:
+        return f"create task failed: {exc}", sql_get_user_all_task(username)
 
     provider = normalize_provider(_request_optional_string(request, "provider"))
     try:
@@ -510,6 +515,24 @@ def _platform_balance_response(request: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def _ai_training_plan_response(username: str, request: dict[str, Any]) -> dict[str, Any]:
+    try:
+        plan = build_training_plan(request)
+    except (ValueError, TypeError) as exc:
+        return {
+            "message": f"plan generation failed: {exc}",
+            "wallet": sql_get_wallet(username),
+            "plan": {},
+            "tasks": sql_get_user_all_task(username),
+        }
+    return {
+        "message": "plan generated",
+        "wallet": sql_get_wallet(username),
+        "plan": plan.to_response(),
+        "tasks": sql_get_user_all_task(username),
+    }
+
+
 def _with_wallet(username: str, message: str, tasks: list[dict[str, str]]) -> dict[str, Any]:
     return {
         "message": message,
@@ -548,6 +571,8 @@ def handle_request(text: str) -> dict[str, Any]:
         return _billing_records_response(username)
     if action == "管理员充值":
         return _admin_set_balance(username, request)
+    if action == "AI配置训练":
+        return _ai_training_plan_response(username, request)
 
     if action == "任务同步":
         return _with_wallet(username, "sync success", _refresh_user_tasks(username, request))
