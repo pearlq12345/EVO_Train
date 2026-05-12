@@ -487,18 +487,27 @@ def _platform_balance_response(request: dict[str, Any]) -> dict[str, Any]:
     provider = normalize_provider(_request_optional_string(request, "provider") or "autodl")
     if provider != "autodl":
         return {"message": f"unsupported platform balance provider: {provider}"}
-    balance = AutoDLApiClient().wallet_balance()
-    minimum_assets = int(_request_int(request, "minimumAssets", default=0) or 0)
-    if minimum_assets <= 0:
-        minimum_assets = int(os.environ.get("AUTODL_MIN_ASSETS", "0"))
-    assets = int(balance["assets"])
-    return {
-        "message": "platform balance query success",
-        "provider": provider,
-        "balance": balance,
-        "minimumAssets": str(minimum_assets),
-        "lowBalance": assets < minimum_assets if minimum_assets > 0 else False,
-    }
+    try:
+        balance = AutoDLApiClient().wallet_balance()
+        minimum_assets = int(_request_int(request, "minimumAssets", default=0) or 0)
+        if minimum_assets <= 0:
+            minimum_assets = int(os.environ.get("AUTODL_MIN_ASSETS", "0"))
+        assets = int(balance["assets"])
+        return {
+            "message": "platform balance query success",
+            "provider": provider,
+            "balance": balance,
+            "minimumAssets": str(minimum_assets),
+            "lowBalance": assets < minimum_assets if minimum_assets > 0 else False,
+        }
+    except (SystemExit, Exception) as exc:
+        return {
+            "message": f"platform balance query failed: {exc}",
+            "provider": provider,
+            "balance": {},
+            "minimumAssets": str(_request_int(request, "minimumAssets", default=0) or 0),
+            "lowBalance": True,
+        }
 
 
 def _with_wallet(username: str, message: str, tasks: list[dict[str, str]]) -> dict[str, Any]:

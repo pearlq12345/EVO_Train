@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sql_lite import sql_pack
+from thread_pool.thread_pool import ThreadPool, TrainTaskEvent
 from train import server_function
 from train.platform.autodl import AutoDLPlatform
 
@@ -342,6 +343,32 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["message"], "platform balance query success")
         self.assertEqual(response["balance"]["assets"], "500")
         self.assertTrue(response["lowBalance"])
+
+    def test_platform_balance_query_returns_error_json_when_token_missing(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            response = server_function.handle_request(
+                json.dumps(
+                    {"action": "平台余额查询", "provider": "autodl", "minimumAssets": 1000},
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertIn("platform balance query failed", response["message"])
+        self.assertTrue(response["lowBalance"])
+
+    def test_thread_pool_returns_json_when_handler_crashes(self) -> None:
+        responses: list[str] = []
+        pool = ThreadPool(4, task_handler=lambda request_text: (_ for _ in ()).throw(SystemExit("boom")))
+        pool._handle_event(
+            0,
+            TrainTaskEvent(
+                client_id="client-1",
+                request_text="{}",
+                response_callback=responses.append,
+            ),
+        )
+
+        self.assertEqual(json.loads(responses[0])["message"], "internal error: boom")
 
     def test_admin_actions_require_admin_token_when_configured(self) -> None:
         with patch.dict("os.environ", {"EVO_TRAIN_ADMIN_TOKEN": "admin-secret"}, clear=False):

@@ -10,6 +10,7 @@ It supports task submission, concurrent execution, and graceful shutdown.
 from __future__ import annotations
 
 import argparse
+import json
 import queue
 import threading
 import time
@@ -85,7 +86,11 @@ class ThreadPool:
     def _handle_event(self, worker_id: int, event: Any) -> None:
         """Run the task handler and optionally return its response."""
         log(f"worker-{worker_id} handling {event.client_id}: {event.request_text}")
-        response = self.task_handler(event.request_text)
+        try:
+            response = self.task_handler(event.request_text)
+        except BaseException as exc:
+            response = json.dumps({"message": f"internal error: {exc}", "tasks": []}, ensure_ascii=False)
+            log(f"worker-{worker_id} failed {event.client_id}: {exc}")
         if event.response_callback is not None:
             event.response_callback(response)
         log(f"worker-{worker_id} finished {event.client_id}")
