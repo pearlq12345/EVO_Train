@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from sql_lite import sql_pack
 from train import server_function
+from train.platform.autodl import AutoDLPlatform
 
 
 def _job_body(*, job_id: str = "dlc-job-1", status: str = "Running", reason_message: str = "") -> SimpleNamespace:
@@ -34,6 +35,7 @@ class ServerFunctionTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_start_training_submits_aliyun_job_and_persists_metadata(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
         request = json.dumps(
             {
                 "username": "pearl",
@@ -65,8 +67,84 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(task["checkpointPath"], "/mnt/checkpoints/run-001")
         self.assertEqual(task["datasetPath"], "/mnt/data/demo")
         self.assertEqual(task["status"], "Submitted")
+        self.assertEqual(task["hourlyPriceCents"], "1000")
+        self.assertEqual(task["billingStatus"], "frozen")
+        self.assertEqual(sql_pack.sql_get_wallet("pearl")["frozenCents"], "1000")
+        self.assertEqual(response["wallet"]["balanceCents"], "2000")
+        self.assertEqual(response["wallet"]["frozenCents"], "1000")
+
+    def test_wallet_and_billing_actions_expose_user_balance_and_records(self) -> None:
+        recharge = server_function.handle_request(
+            json.dumps(
+                {"username": "pearl", "action": "管理员充值", "balanceCents": 2500},
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(recharge["message"], "set balance success")
+        self.assertEqual(recharge["wallet"]["balanceCents"], "2500")
+        self.assertEqual(recharge["wallet"]["availableCents"], "2500")
+        self.assertEqual(recharge["billingRecords"][0]["kind"], "admin_set_balance")
+
+        wallet = server_function.handle_request(
+            json.dumps({"username": "pearl", "action": "余额查询"}, ensure_ascii=False)
+        )
+        self.assertEqual(wallet["message"], "wallet query success")
+        self.assertEqual(wallet["wallet"]["balanceCents"], "2500")
+
+        records = server_function.handle_request(
+            json.dumps({"username": "pearl", "action": "账单查询"}, ensure_ascii=False)
+        )
+        self.assertEqual(records["message"], "billing records query success")
+        self.assertEqual(records["billingRecords"][0]["amountCents"], "2500")
+
+    def test_set_price_action_changes_training_freeze_amount(self) -> None:
+        price_set = server_function.handle_request(
+            json.dumps(
+                {"action": "价格设置", "provider": "aliyun", "gpuSpec": "ecs.gn7i-c8g1.2xlarge", "hourlyPriceCents": 1800},
+                ensure_ascii=False,
+            )
+        )
+        self.assertEqual(price_set["message"], "set gpu price success")
+        price_query = server_function.handle_request(
+            json.dumps({"action": "价格查询", "provider": "aliyun"}, ensure_ascii=False)
+        )
+        self.assertEqual(price_query["message"], "price query success")
+        self.assertEqual(price_query["prices"][0]["hourlyPriceCents"], "1800")
+        sql_pack.sql_set_user_balance("pearl", 2000)
+
+        with (
+            patch.object(server_function.start_train, "load_env"),
+            patch.object(server_function.start_train, "create_client", return_value=object()),
+            patch.object(server_function.start_train, "create_job", return_value=_job_body(job_id="job-price")),
+        ):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "taskName": "run-price",
+                        "action": "开始训练",
+                        "provider": "aliyun",
+                        "datasetPath": "/mnt/data/demo",
+                        "epochs": 3,
+                        "checkpointPath": "/mnt/checkpoints/run-price",
+                        "checkpointFrequency": 1,
+                        "gpuCount": 1,
+                        "gpuSpec": "ecs.gn7i-c8g1.2xlarge",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "create task success")
+        self.assertEqual(response["tasks"][0]["hourlyPriceCents"], "1800")
+        wallet = sql_pack.sql_get_wallet("pearl")
+        self.assertEqual(wallet["balanceCents"], "2000")
+        self.assertEqual(wallet["frozenCents"], "1800")
 
     def test_sync_refreshes_remote_status(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "run-002", 1000, "test setup"))
         created = sql_pack.sql_add_user_task(
             "pearl",
             "run-002",
@@ -75,6 +153,10 @@ class ServerFunctionTests(unittest.TestCase):
             remote_job_id="job-234",
             checkpoint_path="/mnt/checkpoints/run-002",
             dataset_path="/mnt/data/demo",
+            hourly_price_cents=1000,
+            frozen_until=sql_pack.add_hours_text(sql_pack.utc_now_text(), 1),
+            started_at=sql_pack.utc_now_text(),
+            billing_status="frozen",
         )
         self.assertTrue(created)
 
@@ -92,12 +174,18 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["tasks"][0]["jobId"], "job-234")
 
     def test_stop_training_marks_remote_task_stopped(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "run-003", 1000, "test setup"))
         created = sql_pack.sql_add_user_task(
             "pearl",
             "run-003",
             status="Running",
             provider="aliyun",
             remote_job_id="job-345",
+            hourly_price_cents=1000,
+            frozen_until=sql_pack.add_hours_text(sql_pack.utc_now_text(), 1),
+            started_at=sql_pack.utc_now_text(),
+            billing_status="frozen",
         )
         self.assertTrue(created)
 
@@ -115,6 +203,11 @@ class ServerFunctionTests(unittest.TestCase):
 
         self.assertEqual(response["message"], "stop task success")
         self.assertEqual(response["tasks"][0]["status"], "STOPPED")
+        self.assertEqual(response["tasks"][0]["billingStatus"], "settled")
+        self.assertEqual(response["tasks"][0]["actualCostCents"], "1000")
+        wallet = sql_pack.sql_get_wallet("pearl")
+        self.assertEqual(wallet["balanceCents"], "1000")
+        self.assertEqual(wallet["frozenCents"], "0")
 
     def test_delete_task_removes_row(self) -> None:
         self.assertTrue(sql_pack.sql_add_user_task("pearl", "run-004"))
@@ -133,7 +226,7 @@ class ServerFunctionTests(unittest.TestCase):
                     "username": "pearl",
                     "taskName": "run-005",
                     "action": "开始训练",
-                    "provider": "autodl",
+                    "provider": "foo",
                     "datasetPath": "/mnt/data/demo",
                     "epochs": 3,
                     "checkpointPath": "/mnt/checkpoints/run-005",
@@ -144,8 +237,216 @@ class ServerFunctionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(response["message"], "unsupported provider: autodl")
+        self.assertEqual(response["message"], "unsupported provider: foo")
         self.assertEqual(response["tasks"], [])
+
+    def test_start_training_supports_autodl_with_same_billing_gate(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 3000)
+        platform = SimpleNamespace(submit=lambda job_config: "autodl-job-1")
+
+        with patch.object(server_function, "get_platform", return_value=platform) as mocked_factory:
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "taskName": "autodl-run",
+                        "action": "开始训练",
+                        "provider": "autodl",
+                        "command": "python eval.py --suite libero_object_task",
+                        "workdir": "/root/autodl-tmp/evf",
+                        "hourlyPriceCents": 1200,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "create task success")
+        mocked_factory.assert_called_once_with("autodl", region_id="cn-hangzhou")
+        task = response["tasks"][0]
+        self.assertEqual(task["provider"], "autodl")
+        self.assertEqual(task["jobId"], "autodl-job-1")
+        self.assertEqual(task["hourlyPriceCents"], "1200")
+        self.assertEqual(response["wallet"]["frozenCents"], "1200")
+
+    def test_billing_scan_stops_autodl_task_when_next_hour_cannot_be_frozen(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 1000)
+        self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "autodl-run-2", 1000, "test setup"))
+        self.assertTrue(
+            sql_pack.sql_add_user_task(
+                "pearl",
+                "autodl-run-2",
+                status="Running",
+                provider="autodl",
+                remote_job_id="autodl-job-2",
+                hourly_price_cents=1000,
+                frozen_until=sql_pack.add_hours_text(sql_pack.utc_now_text(), -1),
+                started_at=sql_pack.add_hours_text(sql_pack.utc_now_text(), -1),
+                billing_status="frozen",
+            )
+        )
+        platform = SimpleNamespace(
+            metadata=lambda job_id: {"status": "Running", "last_error": ""},
+            stop=lambda job_id: None,
+        )
+
+        with patch.object(server_function, "get_platform", return_value=platform) as mocked_factory:
+            stats = server_function.scan_billing_tasks()
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertGreaterEqual(mocked_factory.call_count, 1)
+        task = sql_pack.sql_get_user_task("pearl", "autodl-run-2")
+        self.assertEqual(task["status"], "STOPPED")
+        self.assertEqual(task["billingStatus"], "settled")
+        self.assertEqual(sql_pack.sql_get_wallet("pearl")["balanceCents"], "0")
+
+    def test_autodl_managed_platform_powers_on_instance_and_returns_composite_job_id(self) -> None:
+        class FakeApi:
+            def __init__(self) -> None:
+                self.powered_on: list[str] = []
+
+            def wallet_balance(self) -> dict[str, str]:
+                return {"assets": "5000", "accumulate": "0", "voucherBalance": "0"}
+
+            def status(self, instance_uuid: str) -> str:
+                return "running"
+
+            def power_on(self, instance_uuid: str, start_command: str | None = None) -> None:
+                self.powered_on.append(instance_uuid)
+
+        platform = AutoDLPlatform(host="demo.autodl", port=22, user="root", key_path="/tmp/key", api_client=FakeApi())
+        with patch.dict("os.environ", {"AUTODL_TOKEN": "token"}, clear=False):
+            with patch.object(platform, "_exec", return_value=(0, "runner-1", "")):
+                job_id = platform.submit(
+                    {
+                        "command": "python eval.py",
+                        "workdir": "/root/autodl-tmp/evf",
+                        "autodl_instance_uuid": "pro-1",
+                    }
+                )
+
+        self.assertEqual(job_id, "pro-1::runner-1")
+
+    def test_platform_balance_query_reports_low_autodl_balance(self) -> None:
+        class FakeClient:
+            def wallet_balance(self) -> dict[str, str]:
+                return {"assets": "500", "accumulate": "100", "voucherBalance": "0"}
+
+        with patch.object(server_function, "AutoDLApiClient", return_value=FakeClient()):
+            response = server_function.handle_request(
+                json.dumps(
+                    {"action": "平台余额查询", "provider": "autodl", "minimumAssets": 1000},
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "platform balance query success")
+        self.assertEqual(response["balance"]["assets"], "500")
+        self.assertTrue(response["lowBalance"])
+
+    def test_start_training_rejects_insufficient_balance(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 999)
+
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "taskName": "run-006",
+                    "action": "开始训练",
+                    "provider": "aliyun",
+                    "datasetPath": "/mnt/data/demo",
+                    "epochs": 3,
+                    "checkpointPath": "/mnt/checkpoints/run-006",
+                    "checkpointFrequency": 1,
+                    "gpuCount": 1,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertIn("insufficient balance", response["message"])
+        self.assertEqual(response["tasks"], [])
+        wallet = sql_pack.sql_get_wallet("pearl")
+        self.assertEqual(wallet["balanceCents"], "999")
+        self.assertEqual(wallet["frozenCents"], "0")
+
+    def test_sync_settles_succeeded_task_billing(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "run-007", 1000, "test setup"))
+        self.assertTrue(
+            sql_pack.sql_add_user_task(
+                "pearl",
+                "run-007",
+                status="Running",
+                provider="aliyun",
+                remote_job_id="job-777",
+                hourly_price_cents=1000,
+                frozen_until=sql_pack.add_hours_text(sql_pack.utc_now_text(), 1),
+                started_at=sql_pack.utc_now_text(),
+                billing_status="frozen",
+            )
+        )
+
+        with (
+            patch.object(server_function.start_train, "load_env"),
+            patch.object(server_function.start_train, "create_client", return_value=object()),
+            patch.object(
+                server_function.start_train,
+                "fetch_job_body",
+                return_value=_job_body(job_id="job-777", status="Succeeded"),
+            ),
+        ):
+            response = server_function.handle_request(
+                json.dumps({"username": "pearl", "action": "任务同步"}, ensure_ascii=False)
+            )
+
+        task = response["tasks"][0]
+        self.assertEqual(task["status"], "Succeeded")
+        self.assertEqual(task["billingStatus"], "settled")
+        self.assertEqual(task["actualCostCents"], "1000")
+        wallet = sql_pack.sql_get_wallet("pearl")
+        self.assertEqual(wallet["balanceCents"], "1000")
+        self.assertEqual(wallet["frozenCents"], "0")
+
+    def test_billing_scan_stops_running_task_when_next_hour_cannot_be_frozen(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 1000)
+        self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "run-008", 1000, "test setup"))
+        self.assertTrue(
+            sql_pack.sql_add_user_task(
+                "pearl",
+                "run-008",
+                status="Running",
+                provider="aliyun",
+                remote_job_id="job-888",
+                hourly_price_cents=1000,
+                frozen_until=sql_pack.add_hours_text(sql_pack.utc_now_text(), -1),
+                started_at=sql_pack.add_hours_text(sql_pack.utc_now_text(), -1),
+                billing_status="frozen",
+            )
+        )
+
+        with (
+            patch.object(server_function.start_train, "load_env"),
+            patch.object(server_function.start_train, "create_client", return_value=object()),
+            patch.object(
+                server_function.start_train,
+                "fetch_job_body",
+                return_value=_job_body(job_id="job-888", status="Running"),
+            ),
+            patch.object(server_function.start_train, "stop_job") as mocked_stop,
+        ):
+            stats = server_function.scan_billing_tasks()
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["updated"], 1)
+        mocked_stop.assert_called_once()
+        task = sql_pack.sql_get_user_task("pearl", "run-008")
+        self.assertEqual(task["status"], "STOPPED")
+        self.assertEqual(task["billingStatus"], "settled")
+        self.assertEqual(task["actualCostCents"], "1000")
+        self.assertEqual(task["error"], "insufficient balance for next training hour")
+        wallet = sql_pack.sql_get_wallet("pearl")
+        self.assertEqual(wallet["balanceCents"], "0")
+        self.assertEqual(wallet["frozenCents"], "0")
 
 
 if __name__ == "__main__":

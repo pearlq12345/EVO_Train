@@ -8,16 +8,36 @@ import json
 from typing import Any
 
 from sql_lite.sql_pack import (
+    add_hours_text,
+    parse_timestamp,
+    sql_charge_frozen_balance,
     sql_add_user_task,
     sql_delete_user_task,
+    sql_freeze_user_balance,
+    sql_get_billing_watch_tasks,
+    sql_get_hourly_price,
+    sql_get_gpu_prices,
+    sql_get_task_frozen_cents,
     sql_get_user_all_task,
     sql_get_user_task,
+    sql_get_wallet,
+    sql_get_billing_records,
+    sql_refund_frozen_balance,
+    sql_set_gpu_price,
+    sql_set_user_balance,
     sql_update_user_task,
+    utc_now_text,
 )
 from train import start_train
+from train.platform.autodl import AutoDLApiClient
+from train.platform.factory import get_platform, normalize_provider
 
 
 TERMINAL_STATUSES = start_train.DONE_STATUSES | start_train.FAILED_STATUSES | {"STOPPED"}
+
+
+def _is_terminal_status(status: str) -> bool:
+    return status in TERMINAL_STATUSES or status.startswith("Instance:")
 
 
 def _request_string(request: dict[str, Any], key: str) -> str:
@@ -60,6 +80,14 @@ def _request_mounts(request: dict[str, Any]) -> list[str] | None:
     return [str(mounts).strip()]
 
 
+def _hourly_price_cents(provider: str, request: dict[str, Any]) -> int:
+    explicit_price = _request_int(request, "hourlyPriceCents")
+    if explicit_price is not None:
+        return explicit_price
+    gpu_spec = _request_optional_string(request, "gpuSpec") or _request_optional_string(request, "ecsSpec") or "default"
+    return sql_get_hourly_price(provider, gpu_spec)
+
+
 def _build_submit_args(request: dict[str, Any], task_name: str) -> argparse.Namespace:
     return argparse.Namespace(
         region=_request_optional_string(request, "region") or "cn-hangzhou",
@@ -89,63 +117,175 @@ def _build_submit_args(request: dict[str, Any], task_name: str) -> argparse.Name
     )
 
 
-def _create_aliyun_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+def _build_job_config(request: dict[str, Any], task_name: str, provider: str) -> dict[str, Any]:
+    command = _request_optional_string(request, "command")
+    return {
+        "provider": provider,
+        "region": _request_optional_string(request, "region") or "cn-hangzhou",
+        "env_file": _request_optional_string(request, "envFile"),
+        "dataset_path": _request_string(request, "datasetPath"),
+        "epochs": _request_int(request, "epochs", required=command is None),
+        "checkpoint_path": _request_string(request, "checkpointPath"),
+        "checkpoint_frequency": _request_int(request, "checkpointFrequency", required=command is None),
+        "command": command,
+        "command_template": _request_optional_string(request, "commandTemplate"),
+        "job_name": _request_optional_string(request, "jobName") or task_name,
+        "workspace_id": _request_optional_string(request, "workspaceId"),
+        "resource_id": _request_optional_string(request, "resourceId"),
+        "image": _request_optional_string(request, "image"),
+        "description": _request_optional_string(request, "description"),
+        "ecs_spec": _request_optional_string(request, "ecsSpec"),
+        "gpu_count": _request_int(request, "gpuCount", required=command is None),
+        "gpu_type": _request_optional_string(request, "gpuType"),
+        "cpu": _request_int(request, "cpu"),
+        "memory": _request_int(request, "memory"),
+        "max_running_minutes": _request_int(request, "maxRunningMinutes"),
+        "mount": _request_mounts(request),
+        "wait": _request_bool(request, "wait"),
+        "timeout": _request_int(request, "timeout", default=86400),
+        "interval": _request_int(request, "interval", default=30),
+        "dry_run": _request_bool(request, "dryRun"),
+        "workdir": _request_optional_string(request, "workdir"),
+        "autodl_managed": _request_bool(request, "autodlManaged"),
+        "autodl_instance_uuid": _request_optional_string(request, "autodlInstanceUuid"),
+        "autodl_start_command": _request_optional_string(request, "autodlStartCommand"),
+        "autodl_gpu_spec_uuid": _request_optional_string(request, "autodlGpuSpecUuid"),
+        "autodl_image_uuid": _request_optional_string(request, "autodlImageUuid"),
+        "autodl_data_centers": _request_optional_string(request, "autodlDataCenters"),
+        "expand_system_disk_by_gb": _request_int(request, "expandSystemDiskGb"),
+    }
+
+
+def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     if sql_get_user_task(username, task_name) is not None:
         return "create task failed", sql_get_user_all_task(username)
 
-    provider = _request_optional_string(request, "provider") or "aliyun"
-    if provider != "aliyun":
+    provider = normalize_provider(_request_optional_string(request, "provider"))
+    try:
+        platform = get_platform(provider, region_id=_request_optional_string(request, "region") or "cn-hangzhou")
+    except ValueError:
         return f"unsupported provider: {provider}", sql_get_user_all_task(username)
 
+    hourly_price_cents = _hourly_price_cents(provider, request)
+    if hourly_price_cents <= 0:
+        return "invalid hourly price", sql_get_user_all_task(username)
+    if not sql_freeze_user_balance(username, task_name, hourly_price_cents, "freeze first training hour"):
+        wallet = sql_get_wallet(username)
+        return (
+            f"insufficient balance: need at least {hourly_price_cents} cents for 1 hour, "
+            f"available {wallet['availableCents']} cents",
+            sql_get_user_all_task(username),
+        )
+
     try:
-        args = _build_submit_args(request, task_name)
-        if not args.dataset_path:
+        job_config = _build_job_config(request, task_name, provider)
+        if not job_config["command"] and not job_config["dataset_path"]:
             raise ValueError("missing required field: datasetPath")
-        if not args.checkpoint_path:
+        if not job_config["command"] and not job_config["checkpoint_path"]:
             raise ValueError("missing required field: checkpointPath")
-        start_train.load_env(args.env_file)
-        client = start_train.create_client(args.region)
-        body = start_train.create_job(client, args)
-        if body is None:
+        remote_job_id = platform.submit(job_config)
+        if not remote_job_id and job_config["dry_run"]:
+            sql_refund_frozen_balance(username, task_name, hourly_price_cents, "dry run")
             return "dry run only", sql_get_user_all_task(username)
-        remote_job_id = str(getattr(body, "job_id", "") or "")
         if not remote_job_id:
             return "create task failed: missing remote job id", sql_get_user_all_task(username)
         created = sql_add_user_task(
             username,
             task_name,
             status="Submitted",
-            provider="aliyun",
+            provider=provider,
             remote_job_id=remote_job_id,
-            checkpoint_path=args.checkpoint_path,
-            dataset_path=args.dataset_path,
+            checkpoint_path=str(job_config["checkpoint_path"] or ""),
+            dataset_path=str(job_config["dataset_path"] or ""),
+            hourly_price_cents=hourly_price_cents,
+            frozen_until=add_hours_text(utc_now_text(), 1),
+            started_at=utc_now_text(),
+            billing_status="frozen",
         )
         if not created:
+            sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task row create failed")
             return "create task failed", sql_get_user_all_task(username)
         return "create task success", sql_get_user_all_task(username)
     except (ValueError, SystemExit) as exc:
+        sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task create failed")
         return str(exc), sql_get_user_all_task(username)
     except Exception as exc:
+        sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task create failed")
         return f"create task failed: {exc}", sql_get_user_all_task(username)
 
 
-def _refresh_aliyun_task(task: dict[str, str], env_file: str | None = None, region: str | None = None) -> None:
-    if task.get("provider") != "aliyun":
-        return
+def _refresh_platform_task(task: dict[str, str], env_file: str | None = None, region: str | None = None) -> None:
+    provider = normalize_provider(task.get("provider"))
     remote_job_id = task.get("jobId", "")
     status = task.get("status", "")
-    if not remote_job_id or status in TERMINAL_STATUSES:
+    if _is_terminal_status(status):
+        _settle_task_billing(task["username"], task["taskName"], status)
+        return
+    if not remote_job_id:
         return
 
-    start_train.load_env(env_file)
-    client = start_train.create_client(region or "cn-hangzhou")
-    body = start_train.fetch_job_body(client, remote_job_id, need_detail=False)
-    payload = start_train.build_status_payload(body)
+    platform = get_platform(provider, region_id=region or "cn-hangzhou")
+    metadata = platform.metadata(remote_job_id)
     sql_update_user_task(
         task["username"],  # type: ignore[index]
         task["taskName"],
-        status=payload["status"] or status,
-        last_error=payload["reason_message"] or "",
+        status=metadata.get("status") or status,
+        last_error=metadata.get("last_error", ""),
+    )
+    refreshed_status = metadata.get("status") or status
+    if _is_terminal_status(refreshed_status):
+        _settle_task_billing(task["username"], task["taskName"], refreshed_status)
+    elif refreshed_status == "Running":
+        _ensure_next_billing_hour(task["username"], task["taskName"], env_file=env_file, region=region)
+
+
+def _ensure_next_billing_hour(username: str, task_name: str, env_file: str | None = None, region: str | None = None) -> None:
+    task = sql_get_user_task(username, task_name)
+    if task is None:
+        return
+    frozen_until = parse_timestamp(task.get("frozenUntil"))
+    if frozen_until is None or frozen_until > parse_timestamp(utc_now_text()):
+        return
+    hourly_price_cents = int(task.get("hourlyPriceCents") or "0")
+    if hourly_price_cents <= 0:
+        return
+    if sql_freeze_user_balance(username, task_name, hourly_price_cents, "freeze next training hour"):
+        sql_update_user_task(username, task_name, frozen_until=add_hours_text(task["frozenUntil"], 1))
+        return
+
+    try:
+        provider = normalize_provider(task.get("provider"))
+        platform = get_platform(provider, region_id=region or "cn-hangzhou")
+        platform.stop(task["jobId"])
+    finally:
+        sql_update_user_task(
+            username,
+            task_name,
+            status="STOPPED",
+            stopped_at=utc_now_text(),
+            billing_status="stopped_insufficient_balance",
+            last_error="insufficient balance for next training hour",
+        )
+        _settle_task_billing(username, task_name, "STOPPED")
+
+
+def _settle_task_billing(username: str, task_name: str, terminal_status: str) -> None:
+    task = sql_get_user_task(username, task_name)
+    if task is None or task.get("billingStatus") == "settled":
+        return
+    hourly_price_cents = int(task.get("hourlyPriceCents") or "0")
+    if hourly_price_cents <= 0:
+        sql_update_user_task(username, task_name, billing_status="settled")
+        return
+    frozen_cents = sql_get_task_frozen_cents(username, task_name)
+    charge_cents = frozen_cents or hourly_price_cents
+    sql_charge_frozen_balance(username, task_name, charge_cents, f"settle terminal task: {terminal_status}")
+    sql_update_user_task(
+        username,
+        task_name,
+        stopped_at=utc_now_text(),
+        actual_cost_cents=charge_cents,
+        billing_status="settled",
     )
 
 
@@ -159,7 +299,7 @@ def _refresh_user_tasks(username: str, request: dict[str, Any]) -> list[dict[str
     for task in tasks:
         task["username"] = username  # internal helper context, stripped before response
         try:
-            _refresh_aliyun_task(task, env_file=env_file, region=region)
+            _refresh_platform_task(task, env_file=env_file, region=region)
         except (SystemExit, Exception) as exc:
             sql_update_user_task(
                 username,
@@ -170,26 +310,127 @@ def _refresh_user_tasks(username: str, request: dict[str, Any]) -> list[dict[str
     return refreshed
 
 
+def scan_billing_tasks(env_file: str | None = None, region: str | None = None) -> dict[str, int]:
+    """Reconcile billing and enforce wallet limits for all active paid tasks."""
+    stats = {"checked": 0, "updated": 0, "errors": 0}
+    for task in sql_get_billing_watch_tasks():
+        stats["checked"] += 1
+        username = task.get("username", "")
+        task_name = task.get("taskName", "")
+        try:
+            before = sql_get_user_task(username, task_name)
+            _refresh_platform_task(task, env_file=env_file, region=region or "cn-hangzhou")
+            after = sql_get_user_task(username, task_name)
+            if before != after:
+                stats["updated"] += 1
+        except (SystemExit, Exception) as exc:
+            stats["errors"] += 1
+            if username and task_name:
+                sql_update_user_task(username, task_name, last_error=str(exc))
+    return stats
+
+
 def _stop_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     task = sql_get_user_task(username, task_name)
     if task is None:
         return "stop task failed", sql_get_user_all_task(username)
 
-    if task.get("provider") == "aliyun" and task.get("jobId") and task.get("status") not in TERMINAL_STATUSES:
+    if task.get("jobId") and not _is_terminal_status(task.get("status", "")):
         try:
-            env_file = _request_optional_string(request, "envFile")
+            provider = normalize_provider(task.get("provider"))
             region = _request_optional_string(request, "region") or "cn-hangzhou"
-            start_train.load_env(env_file)
-            client = start_train.create_client(region)
-            start_train.stop_job(client, task["jobId"])
+            platform = get_platform(provider, region_id=region)
+            platform.stop(task["jobId"])
+            _settle_task_billing(username, task_name, "STOPPED")
             sql_update_user_task(username, task_name, status="STOPPED", last_error="")
             return "stop task success", sql_get_user_all_task(username)
         except (SystemExit, Exception) as exc:
             sql_update_user_task(username, task_name, last_error=str(exc))
             return f"stop task failed: {exc}", sql_get_user_all_task(username)
 
+    _settle_task_billing(username, task_name, "STOPPED")
     updated = sql_update_user_task(username, task_name, status="STOPPED")
     return ("stop task success" if updated else "stop task failed"), sql_get_user_all_task(username)
+
+
+def _wallet_response(username: str) -> dict[str, Any]:
+    return {
+        "message": "wallet query success",
+        "wallet": sql_get_wallet(username),
+        "tasks": sql_get_user_all_task(username),
+    }
+
+
+def _billing_records_response(username: str) -> dict[str, Any]:
+    return {
+        "message": "billing records query success",
+        "wallet": sql_get_wallet(username),
+        "billingRecords": sql_get_billing_records(username),
+        "tasks": sql_get_user_all_task(username),
+    }
+
+
+def _admin_set_balance(username: str, request: dict[str, Any]) -> dict[str, Any]:
+    amount = _request_int(request, "balanceCents", required=True)
+    if amount is None or amount < 0:
+        return {"message": "invalid balance", "wallet": sql_get_wallet(username), "tasks": sql_get_user_all_task(username)}
+    sql_set_user_balance(username, amount)
+    return {
+        "message": "set balance success",
+        "wallet": sql_get_wallet(username),
+        "billingRecords": sql_get_billing_records(username),
+        "tasks": sql_get_user_all_task(username),
+    }
+
+
+def _admin_set_price(request: dict[str, Any]) -> dict[str, Any]:
+    provider = _request_optional_string(request, "provider") or "aliyun"
+    gpu_spec = _request_optional_string(request, "gpuSpec") or _request_optional_string(request, "ecsSpec") or "default"
+    amount = _request_int(request, "hourlyPriceCents", required=True)
+    if amount is None or amount <= 0:
+        return {"message": "invalid hourly price"}
+    sql_set_gpu_price(provider, gpu_spec, amount)
+    return {
+        "message": "set gpu price success",
+        "provider": provider,
+        "gpuSpec": gpu_spec,
+        "hourlyPriceCents": str(sql_get_hourly_price(provider, gpu_spec)),
+    }
+
+
+def _price_response(request: dict[str, Any]) -> dict[str, Any]:
+    provider = _request_optional_string(request, "provider")
+    return {
+        "message": "price query success",
+        "prices": sql_get_gpu_prices(provider),
+    }
+
+
+def _platform_balance_response(request: dict[str, Any]) -> dict[str, Any]:
+    provider = normalize_provider(_request_optional_string(request, "provider") or "autodl")
+    if provider != "autodl":
+        return {"message": f"unsupported platform balance provider: {provider}"}
+    balance = AutoDLApiClient().wallet_balance()
+    minimum_assets = int(_request_int(request, "minimumAssets", default=0) or 0)
+    if minimum_assets <= 0:
+        import os
+        minimum_assets = int(os.environ.get("AUTODL_MIN_ASSETS", "0"))
+    assets = int(balance["assets"])
+    return {
+        "message": "platform balance query success",
+        "provider": provider,
+        "balance": balance,
+        "minimumAssets": str(minimum_assets),
+        "lowBalance": assets < minimum_assets if minimum_assets > 0 else False,
+    }
+
+
+def _with_wallet(username: str, message: str, tasks: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "message": message,
+        "wallet": sql_get_wallet(username),
+        "tasks": tasks,
+    }
 
 
 def handle_request(text: str) -> dict[str, Any]:
@@ -203,14 +444,31 @@ def handle_request(text: str) -> dict[str, Any]:
     task_name = _request_string(request, "taskName")
     action = _request_string(request, "action")
 
+    if action == "价格设置":
+        return _admin_set_price(request)
+    if action == "价格查询":
+        return _price_response(request)
+    if action == "平台余额查询":
+        return _platform_balance_response(request)
+
+    if action in {"余额查询", "账单查询", "管理员充值"} and not username:
+        return {"message": "invalid request", "tasks": []}
+
+    if action == "余额查询":
+        return _wallet_response(username)
+    if action == "账单查询":
+        return _billing_records_response(username)
+    if action == "管理员充值":
+        return _admin_set_balance(username, request)
+
     if action == "任务同步":
-        return {"message": "sync success", "tasks": _refresh_user_tasks(username, request)}
+        return _with_wallet(username, "sync success", _refresh_user_tasks(username, request))
 
     if not username or not task_name:
         return {"message": "invalid request", "tasks": sql_get_user_all_task(username)}
 
     if action == "开始训练":
-        message, tasks = _create_aliyun_task(username, task_name, request)
+        message, tasks = _create_task(username, task_name, request)
     elif action == "结束训练":
         message, tasks = _stop_task(username, task_name, request)
     elif action == "删除任务":
@@ -220,7 +478,7 @@ def handle_request(text: str) -> dict[str, Any]:
         message = "invalid action"
         tasks = sql_get_user_all_task(username)
 
-    return {"message": message, "tasks": tasks}
+    return _with_wallet(username, message, tasks)
 
 
 def handle_request_text(text: str) -> str:

@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from thread_pool.thread_pool import ThreadPool, TrainTaskEvent
+from train.billing_scheduler import BillingScheduler
 from train.server_function import handle_request_text
 
 
@@ -240,6 +241,14 @@ def serve(args: argparse.Namespace) -> None:
     server = make_server_socket(args.host, args.port, args.max_connections)
     selector.register(server, selectors.EVENT_READ, data=None)
     pool.start()
+    billing_scheduler = None
+    if not args.disable_billing_scheduler:
+        billing_scheduler = BillingScheduler(
+            interval_seconds=args.billing_scan_interval,
+            env_file=args.env_file,
+            region=args.region,
+        )
+        billing_scheduler.start()
     log(f"listening on {args.host}:{args.port}, workers={args.workers}, idle_timeout={args.idle_timeout}s")
 
     try:
@@ -272,6 +281,8 @@ def serve(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         log("stopping")
     finally:
+        if billing_scheduler is not None:
+            billing_scheduler.stop()
         close_registered_sockets(selector)
         selector.close()
         pool.train_task_queue.join()
@@ -297,6 +308,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--encoding", default="utf-8", help="Socket text encoding, default: utf-8")
     parser.add_argument("--workers", type=int, choices=(4, 8), default=4, help="Worker thread count, default: 4")
+    parser.add_argument("--region", default="cn-hangzhou", help="Cloud region for background task refresh")
+    parser.add_argument("--env-file", help="Extra .env file for background task refresh")
+    parser.add_argument(
+        "--billing-scan-interval",
+        type=float,
+        default=300.0,
+        help="Seconds between billing reconciliation scans, default: 300",
+    )
+    parser.add_argument(
+        "--disable-billing-scheduler",
+        action="store_true",
+        help="Disable background billing reconciliation",
+    )
     parser.add_argument(
         "--idle-timeout",
         type=float,
@@ -317,6 +341,9 @@ def main() -> int:
         return 2
     if args.idle_timeout <= 0:
         print("--idle-timeout must be greater than 0", file=sys.stderr)
+        return 2
+    if args.billing_scan_interval <= 0:
+        print("--billing-scan-interval must be greater than 0", file=sys.stderr)
         return 2
 
     serve(args)
