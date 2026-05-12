@@ -288,6 +288,50 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["plan"]["params"]["epochs"], 20)
         self.assertIn("--benchmark metaworld", response["plan"]["command"])
         self.assertTrue(response["plan"]["needsConfirmation"])
+        self.assertEqual(response["plan"]["missingFields"], [])
+        self.assertEqual(response["plan"]["estimatedHours"], "1")
+        self.assertEqual(response["plan"]["estimatedMinimumCostCents"], "1000")
+        self.assertTrue(response["plan"]["readyToStart"])
+
+    def test_ai_plan_reports_missing_fields_and_warnings(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "evf_metaworld",
+                    "params": {"epochs": 120, "batchSize": 256, "learningRate": 0.02},
+                    "provider": "autodl",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertIn("envName", response["plan"]["missingFields"])
+        self.assertFalse(response["plan"]["readyToStart"])
+        self.assertEqual(response["plan"]["estimatedHours"], "3")
+        self.assertGreaterEqual(len(response["plan"]["warnings"]), 3)
+
+    def test_start_training_rejects_workflow_with_missing_fields(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 3000)
+
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "taskName": "workflow-missing",
+                    "action": "开始训练",
+                    "provider": "autodl",
+                    "workflow": "evf_metaworld",
+                    "params": {"epochs": 5},
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertIn("missing workflow fields: envName", response["message"])
+        self.assertEqual(sql_pack.sql_get_wallet("pearl")["frozenCents"], "0")
 
     def test_start_training_materializes_workflow_before_provider_submit(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 3000)

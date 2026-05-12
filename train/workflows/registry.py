@@ -76,6 +76,8 @@ def materialize_training_request(request: dict[str, Any]) -> dict[str, Any]:
     if not request.get("workflow"):
         return request
     plan = build_training_plan(request)
+    if plan.missing_fields:
+        raise ValueError(f"missing workflow fields: {', '.join(plan.missing_fields)}")
     materialized = dict(request)
     materialized["provider"] = plan.provider
     materialized["command"] = plan.command

@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import WorkflowPlan, param_bool, param_float, param_int, param_string, quote_args
+from .base import (
+    WorkflowPlan,
+    estimate_hours,
+    param_bool,
+    param_float,
+    param_int,
+    param_string,
+    quote_args,
+    training_warnings,
+)
 
 
 WORKFLOW_NAME = "evf_metaworld"
@@ -22,6 +31,14 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
     provider = str(request.get("provider") or params.get("provider") or "autodl")
     gpu_spec = param_string(params, "gpuSpec", str(request.get("gpuSpec") or "default"))
     hourly_price_cents = int(request.get("hourlyPriceCents") or params.get("hourlyPriceCents") or 1000)
+    missing_fields = [field for field in ("envName",) if not params.get(field)]
+    warnings = training_warnings(
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        eval_episodes=eval_episodes,
+        gpu_spec=gpu_spec,
+    )
 
     command_parts = [
         "python",
@@ -66,5 +83,8 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
         dataset_path=dataset_path,
         gpu_spec=gpu_spec,
         hourly_price_cents=hourly_price_cents,
+        missing_fields=missing_fields,
+        warnings=warnings,
+        estimated_hours=estimate_hours(epochs, eval_episodes),
         summary=f"MetaWorld {env_name}: train {epochs} epochs, then evaluate {eval_episodes} episodes.",
     )

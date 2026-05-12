@@ -74,8 +74,12 @@ current request / response notes：
        请求：
        {"username":"u","action":"AI配置训练","message":"我想在metaworld上跑pick-place，20个epoch，训练后评估10个episode","provider":"autodl"}
        返回 plan：
-       workflow / provider / params / command / workdir / checkpointPath / datasetPath / gpuSpec / hourlyPriceCents / summary / needsConfirmation
+       workflow / provider / params / command / workdir / checkpointPath / datasetPath / gpuSpec /
+       hourlyPriceCents / estimatedHours / estimatedMinimumCostCents / missingFields / warnings /
+       readyToStart / summary / needsConfirmation
      - 用户确认后，前端把 plan 的 workflow/params 交给 action="开始训练"。
+     - 如果 missingFields 非空，RoboClaw 应继续追问用户，不应该开始训练。
+     - warnings 用于给用户确认预算、GPU、超参风险；estimatedMinimumCostCents 是最低预冻结费用。
 
   1. action="开始训练"
      - 当前支持 provider=aliyun / provider=autodl
@@ -166,7 +170,7 @@ workflow / recipe：
   3. 推荐交互
      - 用户：我想在 metaworld pick-place 跑 20 个 epoch，训练完评估 SR
      - RoboClaw -> EVO_Train: action="AI配置训练"
-     - EVO_Train 返回 plan 和预估小时价格
+     - EVO_Train 返回 plan、缺失字段、风险提示和最低预冻结费用
      - 用户确认
      - RoboClaw -> EVO_Train: action="开始训练", workflow="evf_metaworld", params={...}
      - EVO_Train 冻结用户余额，开 AutoDL 实例，执行 recipe command，后续同步状态/下载结果
