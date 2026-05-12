@@ -105,7 +105,14 @@ def _delete_task(username: str, task_name: str) -> tuple[str, list[dict[str, str
         if this_req.status in {"Succeeded", "Failed", "Stopped"}:
             message = f"{task_name}: results are deleted."
             print(f"[任务删除成功] {message}")
-            shutil.rmtree(TASK_OUTPUT_DIR % (username, task_name), ignore_errors=True)
+            delete_path = TASK_OUTPUT_DIR % (username, task_name)
+            print(f"[任务删除路径] {delete_path}")
+            try:
+                shutil.rmtree(delete_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"[任务删除失败] {delete_path}: {exc}")
             if sql_delete_user_task(username, task_name):
                 message = f"{message} Update sql success"
             else:
