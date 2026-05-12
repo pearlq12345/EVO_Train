@@ -36,6 +36,8 @@ class Client:
     idle_deadline: float = 0.0
     read_buffer: str = ""
     closed: bool = False
+    pending_responses: int = 0
+    close_after_response: bool = False
 
     @property
     def id(self) -> str:
@@ -76,6 +78,14 @@ def close_client(client: Client, reason: str) -> None:
         client.socket.close()
     finally:
         log(f"closed {client.id}: {reason}")
+
+
+def finish_response(selector: selectors.BaseSelector, client: Client) -> None:
+    """Mark one worker response as sent and close half-closed clients."""
+    if client.pending_responses > 0:
+        client.pending_responses -= 1
+    if client.close_after_response and client.pending_responses == 0:
+        unregister_and_close(selector, client, "response sent after peer closed")
 
 
 def unregister_and_close(selector: selectors.BaseSelector, client: Client, reason: str) -> None:
@@ -143,6 +153,8 @@ def make_response_callback(
             log(f"response sent to {client.id}")
         except OSError as exc:
             unregister_and_close(selector, client, f"send error: {exc}")
+            return
+        finish_response(selector, client)
     return send_response
 
 
@@ -198,7 +210,12 @@ def read_client(
         return
 
     if not data:
-        unregister_and_close(selector, client, "peer closed")
+        if client.pending_responses > 0:
+            client.close_after_response = True
+            unregister_socket(selector, client.socket)
+            log(f"peer closed {client.id}; waiting for {client.pending_responses} response(s)")
+        else:
+            unregister_and_close(selector, client, "peer closed")
         return
 
     schedule_idle_timeout(timer_heap, timer_counter, client, idle_timeout)
@@ -212,6 +229,7 @@ def read_client(
         return None
 
     log(f"read event from {client.id}: {request_text}")
+    client.pending_responses += 1
     return TrainTaskEvent(
         client_id=client.id,
         request_text=request_text,
