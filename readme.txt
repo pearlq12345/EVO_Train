@@ -76,6 +76,8 @@ current request / response notes：
        {"username":"u","taskName":"eval-1","action":"开始训练","provider":"autodl","command":"python eval.py --suite libero_object_task","workdir":"/root/autodl-tmp/evf"}
      - AutoDL 托管实例模式可传：
        {"username":"u","taskName":"eval-1","action":"开始训练","provider":"autodl","command":"python eval.py","workdir":"/root/autodl-tmp/evf","autodlManaged":true,"autodlInstanceUuid":"pro-xxxx"}
+     - 产品模式下，普通用户不需要传 AUTODL_HOST / AUTODL_PORT / AUTODL_KEY_PATH。
+       后端会用团队 AUTODL_TOKEN 创建/开机实例，并通过 AutoDL snapshot 自动读取 proxy_host / ssh_port / root_password 执行训练。
      - 服务端会提交真实 provider 任务，并把 provider / jobId / checkpointPath / datasetPath
        一起写入 SQLite
      - 训练类接口返回会同时带 wallet，供前端刷新余额
@@ -139,11 +141,13 @@ enterprise api / platform account：
      - 管理员充值接口必须配 EVO_TRAIN_ADMIN_TOKEN，不能裸露在公网
 
 autodl：
-  1. SSH runner 环境变量
+  1. SSH runner 环境变量（手动调试/复用已有实例时使用）
      export AUTODL_HOST='<ssh-host>'
      export AUTODL_PORT='<ssh-port>'
      export AUTODL_USER='root'
      export AUTODL_KEY_PATH='/path/to/private-key'
+     # 如果没有配置 SSH key，也可用密码：
+     export AUTODL_PASSWORD='<ssh-password>'
      export AUTODL_WORKDIR='/root/autodl-tmp/evf'
 
   2. AutoDL API 托管实例环境变量
@@ -155,6 +159,8 @@ autodl：
      export AUTODL_MIN_ASSETS=1000                   # assets/1000=元，低于阈值拒绝新任务
      export AUTODL_POWER_OFF_ON_STOP=true            # 停任务后自动关机
      export AUTODL_RELEASE_ON_STOP=false             # 停任务后是否释放实例
+     # 托管模式会通过 /api/v1/dev/instance/pro/snapshot 自动拿 SSH 连接信息，
+     # 所以正式产品用户侧不需要知道 AutoDL 实例地址、端口、密码或密钥。
 
 task record fields：
   - taskName

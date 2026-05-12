@@ -104,6 +104,13 @@ class AutoDLApiClient:
         payload = self._request("GET", "/api/v1/dev/instance/pro/status", {"instance_uuid": instance_uuid})
         return str(payload.get("data") or "unknown")
 
+    def snapshot(self, instance_uuid: str) -> dict[str, Any]:
+        payload = self._request("GET", "/api/v1/dev/instance/pro/snapshot", {"instance_uuid": instance_uuid})
+        data = payload.get("data") or {}
+        if not isinstance(data, dict):
+            raise RuntimeError(f"AutoDL snapshot returned invalid data: {data}")
+        return data
+
     def power_on(self, instance_uuid: str, start_command: str | None = None) -> None:
         body = {"instance_uuid": instance_uuid, "payload": "gpu"}
         if start_command:
@@ -133,12 +140,21 @@ class AutoDLPlatform(TrainPlatform):
         self.key_path = key_path
         self.api_client = api_client
 
-    def _connection_settings(self) -> tuple[str, int, str, str]:
-        host = require_value(self.host or os.environ.get("AUTODL_HOST"), "AUTODL_HOST")
-        port = self.port if self.port is not None else int(os.environ.get("AUTODL_PORT", "22"))
+    def _connection_settings(self, instance_uuid: str | None = None) -> tuple[str, int, str, str | None, str | None]:
+        snapshot: dict[str, Any] = {}
+        if instance_uuid and not (self.host or os.environ.get("AUTODL_HOST")):
+            snapshot = self._api().snapshot(instance_uuid)
+        host = self.host or os.environ.get("AUTODL_HOST") or str(snapshot.get("proxy_host") or "").strip()
+        if not host:
+            raise SystemExit("Missing required value: AUTODL_HOST or AutoDL snapshot proxy_host")
+        port_value = self.port if self.port is not None else os.environ.get("AUTODL_PORT") or snapshot.get("ssh_port") or 22
+        port = int(port_value)
         user = self.user or os.environ.get("AUTODL_USER", "root")
-        key_path = require_value(self.key_path or os.environ.get("AUTODL_KEY_PATH"), "AUTODL_KEY_PATH")
-        return host, port, user, key_path
+        key_path = self.key_path or os.environ.get("AUTODL_KEY_PATH")
+        password = os.environ.get("AUTODL_PASSWORD") or str(snapshot.get("root_password") or "").strip() or None
+        if not key_path and not password:
+            raise SystemExit("Missing required value: AUTODL_KEY_PATH/AUTODL_PASSWORD or AutoDL snapshot root_password")
+        return host, port, user, key_path, password
 
     def _api(self) -> AutoDLApiClient:
         if self.api_client is None:
@@ -215,22 +231,26 @@ class AutoDLPlatform(TrainPlatform):
         text = str(workdir).strip()
         return text or None
 
-    def _connect(self) -> Any:
-        host, port, user, key_path = self._connection_settings()
+    def _connect(self, instance_uuid: str | None = None) -> Any:
+        host, port, user, key_path, password = self._connection_settings(instance_uuid)
         paramiko = _load_paramiko()
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=host,
-            port=port,
-            username=user,
-            key_filename=str(Path(key_path).expanduser()),
-            timeout=10,
-        )
+        connect_kwargs: dict[str, Any] = {
+            "hostname": host,
+            "port": port,
+            "username": user,
+            "timeout": 10,
+        }
+        if key_path:
+            connect_kwargs["key_filename"] = str(Path(key_path).expanduser())
+        if password:
+            connect_kwargs["password"] = password
+        client.connect(**connect_kwargs)
         return client
 
-    def _exec(self, command: str) -> tuple[int, str, str]:
-        client = self._connect()
+    def _exec(self, command: str, instance_uuid: str | None = None) -> tuple[int, str, str]:
+        client = self._connect(instance_uuid)
         try:
             _, stdout, stderr = client.exec_command(command)
             exit_status = stdout.channel.recv_exit_status()
@@ -277,13 +297,16 @@ class AutoDLPlatform(TrainPlatform):
         workdir = self._working_directory(job_config)
         self._ensure_platform_balance(job_config)
         if config_bool(job_config, "dry_run"):
-            host, port, user, _ = self._connection_settings()
+            host, port, user, _, _ = self._connection_settings()
             print(json.dumps({"host": host, "port": port, "user": user, "job_id": job_id, "command": command}))
             return ""
         instance_uuid = ""
         if self._managed_enabled(job_config):
             instance_uuid = self._ensure_instance_running(job_config)
-        exit_status, stdout, stderr = self._exec(self._build_remote_command(job_id, command, workdir))
+        exit_status, stdout, stderr = self._exec(
+            self._build_remote_command(job_id, command, workdir),
+            instance_uuid=instance_uuid or None,
+        )
         if exit_status != 0:
             raise RuntimeError(f"AutoDL submit failed: {stderr or stdout or 'unknown error'}")
         runner_job_id = stdout or job_id
@@ -312,7 +335,8 @@ class AutoDLPlatform(TrainPlatform):
             'printf "__STATUS__=%s\\n" "$status"; '
             f'if [ "$status" = "Failed" ] && [ -f {shlex.quote(log_file)} ]; then '
             f"tail -n 20 {shlex.quote(log_file)}; "
-            "fi"
+            "fi",
+            instance_uuid=instance_uuid,
         )
         if exit_status != 0:
             return {"status": "Unknown", "last_error": ""}
@@ -334,14 +358,15 @@ class AutoDLPlatform(TrainPlatform):
             f"kill $(cat {shlex.quote(pid_file)}) 2>/dev/null || true; "
             f"rm -f {shlex.quote(pid_file)}; "
             "fi; "
-            f"echo STOPPED > {shlex.quote(stop_file)}"
+            f"echo STOPPED > {shlex.quote(stop_file)}",
+            instance_uuid=instance_uuid,
         )
         if instance_uuid and os.environ.get("AUTODL_POWER_OFF_ON_STOP", "").strip().lower() in {"1", "true", "yes"}:
             self._api().power_off(instance_uuid)
         if instance_uuid and os.environ.get("AUTODL_RELEASE_ON_STOP", "").strip().lower() in {"1", "true", "yes"}:
             self._api().release(instance_uuid)
 
-    def _prepare_artifact(self, runner_job_id: str, artifact_path: str) -> str:
+    def _prepare_artifact(self, runner_job_id: str, artifact_path: str, instance_uuid: str | None = None) -> str:
         tar_file = self._job_artifact_file(runner_job_id)
         exit_status, _, stderr = self._exec(
             f"mkdir -p {shlex.quote(self._job_dir(runner_job_id))}; "
@@ -350,7 +375,8 @@ class AutoDLPlatform(TrainPlatform):
             f"elif [ -f {shlex.quote(artifact_path)} ]; then "
             f"tar -C {shlex.quote(str(Path(artifact_path).parent))} "
             f"-czf {shlex.quote(tar_file)} {shlex.quote(Path(artifact_path).name)}; "
-            "else exit 44; fi"
+            "else exit 44; fi",
+            instance_uuid=instance_uuid,
         )
         if exit_status == 44:
             raise RuntimeError(f"AutoDL artifact path does not exist: {artifact_path}")
@@ -366,22 +392,23 @@ class AutoDLPlatform(TrainPlatform):
         offset: int = 0,
         chunk_size: int = 1024 * 1024,
     ) -> dict[str, str | int | bool]:
-        _, runner_job_id = self._split_job_ref(job_id)
+        instance_uuid, runner_job_id = self._split_job_ref(job_id)
         if offset < 0:
             raise ValueError("offset must be >= 0")
         if chunk_size <= 0:
             raise ValueError("chunk_size must be > 0")
         if offset == 0:
-            tar_file = self._prepare_artifact(runner_job_id, artifact_path)
+            tar_file = self._prepare_artifact(runner_job_id, artifact_path, instance_uuid)
         else:
             tar_file = self._job_artifact_file(runner_job_id)
-            exit_status, _, _ = self._exec(f"test -f {shlex.quote(tar_file)}")
+            exit_status, _, _ = self._exec(f"test -f {shlex.quote(tar_file)}", instance_uuid=instance_uuid)
             if exit_status != 0:
                 raise RuntimeError("AutoDL artifact archive is not prepared; retry with offset=0")
         exit_status, stdout, stderr = self._exec(
             f"size=$(wc -c < {shlex.quote(tar_file)} | tr -d ' '); "
             f"data=$(dd if={shlex.quote(tar_file)} bs=1 skip={offset} count={chunk_size} 2>/dev/null | base64 | tr -d '\\n'); "
-            'printf "__SIZE__=%s\\n__DATA__=%s\\n" "$size" "$data"'
+            'printf "__SIZE__=%s\\n__DATA__=%s\\n" "$size" "$data"',
+            instance_uuid=instance_uuid,
         )
         if exit_status != 0:
             raise RuntimeError(f"AutoDL artifact read failed: {stderr or stdout or 'unknown error'}")

@@ -327,6 +327,26 @@ class ServerFunctionTests(unittest.TestCase):
 
         self.assertEqual(job_id, "pro-1::runner-1")
 
+    def test_autodl_managed_platform_can_use_snapshot_ssh_connection(self) -> None:
+        class FakeApi:
+            def snapshot(self, instance_uuid: str) -> dict[str, object]:
+                return {
+                    "proxy_host": "connect.autodl.example",
+                    "ssh_port": 34222,
+                    "root_password": "secret",
+                }
+
+        platform = AutoDLPlatform(api_client=FakeApi())
+
+        with patch.dict("os.environ", {}, clear=True):
+            host, port, user, key_path, password = platform._connection_settings("pro-1")
+
+        self.assertEqual(host, "connect.autodl.example")
+        self.assertEqual(port, 34222)
+        self.assertEqual(user, "root")
+        self.assertIsNone(key_path)
+        self.assertEqual(password, "secret")
+
     def test_platform_balance_query_reports_low_autodl_balance(self) -> None:
         class FakeClient:
             def wallet_balance(self) -> dict[str, str]:
