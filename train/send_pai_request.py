@@ -94,6 +94,7 @@ class PaiRequest:
         if datasetname != "":
             user_dataset_oss_url = f"{dataset_oss_url}/{usrname}/{datasetname}/"
             data_sources.append(CreateJobRequestDataSources(uri=user_dataset_oss_url, mount_path="/mnt/pai/data/"))
+            print(user_dataset_oss_url)
         else:
             data_sources.append(CreateJobRequestDataSources(data_source_id="d-xfobl8zdj3cqdrleqo", mount_path="/mnt/pai/data/"))
                  
