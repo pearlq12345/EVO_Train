@@ -343,6 +343,45 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["balance"]["assets"], "500")
         self.assertTrue(response["lowBalance"])
 
+    def test_admin_actions_require_admin_token_when_configured(self) -> None:
+        with patch.dict("os.environ", {"EVO_TRAIN_ADMIN_TOKEN": "admin-secret"}, clear=False):
+            rejected = server_function.handle_request(
+                json.dumps(
+                    {"username": "pearl", "action": "管理员充值", "balanceCents": 2500},
+                    ensure_ascii=False,
+                )
+            )
+            accepted = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "action": "管理员充值",
+                        "balanceCents": 2500,
+                        "adminToken": "admin-secret",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(rejected["message"], "unauthorized admin request")
+        self.assertEqual(accepted["message"], "set balance success")
+        self.assertEqual(accepted["wallet"]["balanceCents"], "2500")
+
+    def test_user_actions_require_client_token_when_configured(self) -> None:
+        with patch.dict("os.environ", {"EVO_TRAIN_CLIENT_TOKEN": "client-secret"}, clear=False):
+            rejected = server_function.handle_request(
+                json.dumps({"username": "pearl", "action": "余额查询"}, ensure_ascii=False)
+            )
+            accepted = server_function.handle_request(
+                json.dumps(
+                    {"username": "pearl", "action": "余额查询", "apiToken": "client-secret"},
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(rejected["message"], "unauthorized request")
+        self.assertEqual(accepted["message"], "wallet query success")
+
     def test_autodl_instance_booting_status_is_not_settled_as_terminal(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 2000)
         self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "autodl-booting", 1000, "test setup"))

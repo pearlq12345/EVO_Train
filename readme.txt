@@ -42,24 +42,30 @@ structure：
 └─────────────────────────────────────────────────────────────────────┘
 
 current request / response notes：
+  - 如果部署到公网，建议设置鉴权环境变量：
+    export EVO_TRAIN_CLIENT_TOKEN='<roboclaw-client-token>'
+    export EVO_TRAIN_ADMIN_TOKEN='<admin-token>'
+    用户侧请求带 apiToken/token；管理员请求带 adminToken/apiToken/token。
+    不设置这些环境变量时保持本地开发兼容，不强制鉴权。
+
   0. wallet / billing actions
      - action="余额查询"
-       请求：{"username":"u","action":"余额查询"}
+       请求：{"username":"u","action":"余额查询","apiToken":"<roboclaw-client-token>"}
        返回 wallet / tasks
      - action="账单查询"
        请求：{"username":"u","action":"账单查询"}
        返回 wallet / billingRecords / tasks
      - action="管理员充值"
-       请求：{"username":"u","action":"管理员充值","balanceCents":10000}
+       请求：{"username":"u","action":"管理员充值","balanceCents":10000,"adminToken":"<admin-token>"}
        返回 wallet / billingRecords / tasks
      - action="价格设置"
-       请求：{"action":"价格设置","provider":"aliyun","gpuSpec":"default","hourlyPriceCents":1000}
+       请求：{"action":"价格设置","provider":"aliyun","gpuSpec":"default","hourlyPriceCents":1000,"adminToken":"<admin-token>"}
        返回 provider / gpuSpec / hourlyPriceCents
      - action="价格查询"
        请求：{"action":"价格查询","provider":"aliyun"}
        返回 prices
      - action="平台余额查询"
-       请求：{"action":"平台余额查询","provider":"autodl","minimumAssets":1000}
+       请求：{"action":"平台余额查询","provider":"autodl","minimumAssets":1000,"adminToken":"<admin-token>"}
        返回 AutoDL token 对应账户余额；assets / 1000 = 元，lowBalance=true 时应提醒管理员充值
 
   1. action="开始训练"
@@ -112,6 +118,25 @@ billing：
      - 当前提供的是后端函数 sql_set_user_balance / sql_set_gpu_price，供管理脚本或测试调用
      - TCP action="管理员充值" / action="价格设置" 可用于第一版管理后台
      - 后续真实充值系统只需要写 user_wallets 和 billing_records 即可
+
+enterprise api / platform account：
+  1. 推荐账户模型
+     - 我们团队申请/持有 AutoDL 开发者或企业 API token，并给这个平台账户预充值
+     - 用户不直接拿 AutoDL token；用户只在 RoboClaw/EVO-Train 充值到我们的 user_wallets
+     - 用户开始训练时扣我们系统里的用户余额；底层实际消耗 AutoDL 平台账户余额
+     - AUTODL_MIN_ASSETS 是平台账户安全线，低于阈值就拒绝新托管实例，避免平台账户被打穿
+
+  2. 资金流
+     - 用户支付成功 -> 支付回调/管理员后台写 user_wallets + billing_records
+     - 开始训练 -> 冻结用户至少 1 小时费用
+     - AutoDL 创建/开机/跑训练 -> 消耗我们团队 AutoDL 账户
+     - 每小时续冻用户余额；用户余额不足 -> 自动 stop AutoDL job，并按配置关机/释放实例
+     - 管理后台定期调用 action="平台余额查询"，lowBalance=true 时提醒团队给 AutoDL 企业账户充值
+
+  3. 生产要补的支付闭环
+     - 当前代码已有管理员充值接口，适合内测和人工入账
+     - 真正上线时，把微信/支付宝/Stripe 等支付回调接到同一张 user_wallets / billing_records 即可
+     - 管理员充值接口必须配 EVO_TRAIN_ADMIN_TOKEN，不能裸露在公网
 
 autodl：
   1. SSH runner 环境变量

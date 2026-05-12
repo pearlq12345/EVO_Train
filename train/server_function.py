@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
+import os
 from typing import Any
 
 from sql_lite.sql_pack import (
@@ -42,6 +44,8 @@ TERMINAL_INSTANCE_STATUSES = {
     "Instance:deleted",
     "Instance:not_found",
 }
+ADMIN_ACTIONS = {"管理员充值", "价格设置", "平台余额查询"}
+USER_ACTIONS = {"余额查询", "账单查询", "任务同步", "开始训练", "结束训练", "删除任务", "结果下载"}
 
 
 def _is_terminal_status(status: str) -> bool:
@@ -55,6 +59,38 @@ def _request_string(request: dict[str, Any], key: str) -> str:
 def _request_optional_string(request: dict[str, Any], key: str) -> str | None:
     value = _request_string(request, key)
     return value or None
+
+
+def _request_auth_token(request: dict[str, Any]) -> str:
+    return (
+        _request_string(request, "apiToken")
+        or _request_string(request, "token")
+        or _request_string(request, "adminToken")
+    )
+
+
+def _token_matches(provided: str, expected: str | None) -> bool:
+    if not expected:
+        return True
+    return bool(provided) and hmac.compare_digest(provided, expected)
+
+
+def _authorization_error(request: dict[str, Any], action: str) -> dict[str, Any] | None:
+    provided = _request_auth_token(request)
+    if action in ADMIN_ACTIONS:
+        admin_token = os.environ.get("EVO_TRAIN_ADMIN_TOKEN")
+        if not _token_matches(provided, admin_token):
+            return {"message": "unauthorized admin request", "tasks": []}
+        return None
+    if action in USER_ACTIONS:
+        client_token = os.environ.get("EVO_TRAIN_CLIENT_TOKEN")
+        admin_token = os.environ.get("EVO_TRAIN_ADMIN_TOKEN")
+        if client_token and not (
+            _token_matches(provided, client_token)
+            or (admin_token is not None and _token_matches(provided, admin_token))
+        ):
+            return {"message": "unauthorized request", "tasks": []}
+    return None
 
 
 def _request_int(request: dict[str, Any], key: str, *, required: bool = False, default: int | None = None) -> int | None:
@@ -454,7 +490,6 @@ def _platform_balance_response(request: dict[str, Any]) -> dict[str, Any]:
     balance = AutoDLApiClient().wallet_balance()
     minimum_assets = int(_request_int(request, "minimumAssets", default=0) or 0)
     if minimum_assets <= 0:
-        import os
         minimum_assets = int(os.environ.get("AUTODL_MIN_ASSETS", "0"))
     assets = int(balance["assets"])
     return {
@@ -484,6 +519,9 @@ def handle_request(text: str) -> dict[str, Any]:
     username = _request_string(request, "username")
     task_name = _request_string(request, "taskName")
     action = _request_string(request, "action")
+    auth_error = _authorization_error(request, action)
+    if auth_error is not None:
+        return auth_error
 
     if action == "价格设置":
         return _admin_set_price(request)
