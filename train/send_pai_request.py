@@ -87,12 +87,14 @@ class PaiRequest:
             resource_config=ResourceConfig(cpu=DEFAULT_CPU, gpu=DEFAULT_GPU,
                 memory=DEFAULT_MEMORY, shared_memory=DEFAULT_SHARED_MEMORY),
         )
-        dataset_oss_url = "oss://evo-model-result.oss-cn-hangzhou-internal.aliyuncs.com/all_usr_dataset"
+        # dataset_oss_url = "oss://evo-model-result.oss-cn-hangzhou-internal.aliyuncs.com/all_usr_dataset"
+        dataset_oss_url = "oss://evo-model-result.oss-cn-hangzhou-internal.aliyuncs.com/"
         data_sources = list(DEFAULT_DATA_SOURCES)
         # 如果用户有指定自己的数据集，则将指定的oss路径挂载pai容器的/mnt/pai/data路径下，否则挂载一个默认的数据集到该路径下
         # 对于后端，则是把evo-data/all_usr_dataset/都给挂载到了/home/evomind/usrdata/目录下。
         if datasetname != "":
-            user_dataset_oss_url = f"{dataset_oss_url}/{usrname}/{datasetname}/"
+            # user_dataset_oss_url = f"{dataset_oss_url}/{usrname}/{datasetname}/"
+            user_dataset_oss_url = dataset_oss_url
             data_sources.append(CreateJobRequestDataSources(uri=user_dataset_oss_url, mount_path="/mnt/pai/data/"))
             print(user_dataset_oss_url)
         else:
