@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 
 STOP_EVENT = object()
+QUEUE_LIMIT_FACTOR = 3
 
 
 @dataclass
@@ -46,6 +47,14 @@ def fake_lite_task_handler(request_text: str) -> str:
 
 def fake_download_task_handler(event: TaskEvent) -> None:
     """Temporary debug handler for one download event."""
+
+
+def server_busy_response(queue_size: int) -> str:
+    """Return a JSON response when the corresponding worker queue is too long."""
+    return json.dumps(
+        {"message": f"当前服务器忙，有{queue_size}个任务在前面，请稍后重试", "tasks": []},
+        ensure_ascii=False,
+    )
 
 
 class ThreadPool:
@@ -88,11 +97,21 @@ class ThreadPool:
 
     def submit_lite(self, event: TaskEvent) -> None:
         """Push one training event into the worker queue."""
+        queue_size = self.train_task_queue.qsize()
+        if queue_size >= self.workers * QUEUE_LIMIT_FACTOR:
+            if event.response_callback is not None:
+                event.response_callback(server_busy_response(queue_size))
+            return
         self.train_task_queue.put(event)
         log(f"queued event from {event.client_id}: {event.request_text}")
 
     def submit_download(self, event: TaskEvent) -> None:
         """Push one download event into the download queue."""
+        queue_size = self.download_task_queue.qsize()
+        if queue_size >= self.download_workers * QUEUE_LIMIT_FACTOR:
+            if event.response_callback is not None:
+                event.response_callback(server_busy_response(queue_size))
+            return
         self.download_task_queue.put(event)
 
     def stop_lite(self) -> None:
