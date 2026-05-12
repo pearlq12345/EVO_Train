@@ -343,6 +343,73 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["balance"]["assets"], "500")
         self.assertTrue(response["lowBalance"])
 
+    def test_autodl_instance_booting_status_is_not_settled_as_terminal(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "autodl-booting", 1000, "test setup"))
+        self.assertTrue(
+            sql_pack.sql_add_user_task(
+                "pearl",
+                "autodl-booting",
+                status="Running",
+                provider="autodl",
+                remote_job_id="pro-1::runner-booting",
+                hourly_price_cents=1000,
+                frozen_until=sql_pack.add_hours_text(sql_pack.utc_now_text(), 1),
+                started_at=sql_pack.utc_now_text(),
+                billing_status="frozen",
+            )
+        )
+        platform = SimpleNamespace(metadata=lambda job_id: {"status": "Instance:booting", "last_error": ""})
+
+        with patch.object(server_function, "get_platform", return_value=platform):
+            stats = server_function.scan_billing_tasks()
+
+        self.assertEqual(stats["checked"], 1)
+        task = sql_pack.sql_get_user_task("pearl", "autodl-booting")
+        self.assertEqual(task["status"], "Instance:booting")
+        self.assertEqual(task["billingStatus"], "frozen")
+        self.assertEqual(sql_pack.sql_get_wallet("pearl")["frozenCents"], "1000")
+
+    def test_result_download_uses_provider_chunk_protocol(self) -> None:
+        sql_pack.sql_add_user_task(
+            "pearl",
+            "autodl-artifact",
+            status="Succeeded",
+            provider="autodl",
+            remote_job_id="pro-1::runner-1",
+            checkpoint_path="/root/autodl-tmp/evo_train/output",
+        )
+        platform = SimpleNamespace(
+            download_artifact_chunk=lambda job_id, artifact_path, offset, chunk_size: {
+                "artifactPath": artifact_path,
+                "archivePath": "/root/autodl-tmp/evo_train/jobs/evo_train_runner-1/artifact.tar.gz",
+                "offset": offset,
+                "nextOffset": offset + chunk_size,
+                "chunkSize": chunk_size,
+                "totalBytes": 4096,
+                "done": False,
+                "dataBase64": "YWJj",
+            }
+        )
+
+        with patch.object(server_function, "get_platform", return_value=platform):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "taskName": "autodl-artifact",
+                        "action": "结果下载",
+                        "offset": 0,
+                        "chunkSize": 3,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "download artifact success")
+        self.assertEqual(response["artifact"]["artifactPath"], "/root/autodl-tmp/evo_train/output")
+        self.assertEqual(response["artifact"]["dataBase64"], "YWJj")
+
     def test_start_training_rejects_insufficient_balance(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 999)
 

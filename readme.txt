@@ -84,6 +84,15 @@ current request / response notes：
   4. action="删除任务"
      - 只删除本地 SQLite 记录，不会再额外 stop 远端任务
 
+  5. action="结果下载"
+     - 当前 AutoDL provider 支持 JSON 分块下载：服务端在远端把 artifactPath/checkpointPath 打成 tar.gz，
+       每次返回一段 base64，客户端用 nextOffset 继续拉下一块，done=true 表示结束
+     - 请求：
+       {"username":"u","taskName":"eval-1","action":"结果下载","artifactPath":"/root/autodl-tmp/evo_train/output","offset":0,"chunkSize":1048576}
+     - 返回 artifact：
+       artifactPath / archivePath / offset / nextOffset / chunkSize / totalBytes / done / dataBase64
+     - 这个接口保持 EVO-Train 的 JSON request + \n 协议，不需要另开 HTTP 文件服务
+
 billing：
   1. 当前是最小预付费模型，还没有接真实支付
      - 用户开始训练前，钱包可用余额必须 >= 1 小时预估费用

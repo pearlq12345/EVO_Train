@@ -34,10 +34,18 @@ from train.platform.factory import get_platform, normalize_provider
 
 
 TERMINAL_STATUSES = start_train.DONE_STATUSES | start_train.FAILED_STATUSES | {"STOPPED"}
+TERMINAL_INSTANCE_STATUSES = {
+    "Instance:stopped",
+    "Instance:stopping",
+    "Instance:shutdown",
+    "Instance:released",
+    "Instance:deleted",
+    "Instance:not_found",
+}
 
 
 def _is_terminal_status(status: str) -> bool:
-    return status in TERMINAL_STATUSES or status.startswith("Instance:")
+    return status in TERMINAL_STATUSES or status in TERMINAL_INSTANCE_STATUSES
 
 
 def _request_string(request: dict[str, Any], key: str) -> str:
@@ -353,6 +361,39 @@ def _stop_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[
     return ("stop task success" if updated else "stop task failed"), sql_get_user_all_task(username)
 
 
+def _download_task_artifact(username: str, task_name: str, request: dict[str, Any]) -> dict[str, Any]:
+    task = sql_get_user_task(username, task_name)
+    if task is None:
+        return _with_wallet(username, "download artifact failed", sql_get_user_all_task(username))
+    artifact_path = (
+        _request_optional_string(request, "artifactPath")
+        or _request_optional_string(request, "downloadPath")
+        or task.get("checkpointPath")
+    )
+    if not artifact_path:
+        return _with_wallet(username, "download artifact failed: missing artifactPath", sql_get_user_all_task(username))
+    try:
+        provider = normalize_provider(task.get("provider"))
+        region = _request_optional_string(request, "region") or "cn-hangzhou"
+        offset = _request_int(request, "offset", default=0) or 0
+        chunk_size = _request_int(request, "chunkSize", default=1024 * 1024) or 1024 * 1024
+        platform = get_platform(provider, region_id=region)
+        artifact = platform.download_artifact_chunk(
+            task["jobId"],
+            artifact_path,
+            offset=offset,
+            chunk_size=chunk_size,
+        )
+    except (SystemExit, Exception) as exc:
+        sql_update_user_task(username, task_name, last_error=str(exc))
+        response = _with_wallet(username, f"download artifact failed: {exc}", sql_get_user_all_task(username))
+        response["artifact"] = {}
+        return response
+    response = _with_wallet(username, "download artifact success", sql_get_user_all_task(username))
+    response["artifact"] = artifact
+    return response
+
+
 def _wallet_response(username: str) -> dict[str, Any]:
     return {
         "message": "wallet query success",
@@ -471,6 +512,8 @@ def handle_request(text: str) -> dict[str, Any]:
         message, tasks = _create_task(username, task_name, request)
     elif action == "结束训练":
         message, tasks = _stop_task(username, task_name, request)
+    elif action == "结果下载":
+        return _download_task_artifact(username, task_name, request)
     elif action == "删除任务":
         message = "delete task success" if sql_delete_user_task(username, task_name) else "delete task failed"
         tasks = sql_get_user_all_task(username)

@@ -20,6 +20,17 @@ class TrainPlatform(ABC):
     def stop(self, job_id: str) -> None:
         """Stop one provider job."""
 
+    def download_artifact_chunk(
+        self,
+        job_id: str,
+        artifact_path: str,
+        *,
+        offset: int = 0,
+        chunk_size: int = 1024 * 1024,
+    ) -> dict[str, str | int | bool]:
+        """Return one base64-encoded result chunk for a provider job."""
+        raise NotImplementedError("artifact download is not supported by this provider")
+
 
 def first_value(*values: str | None) -> str | None:
     for value in values:

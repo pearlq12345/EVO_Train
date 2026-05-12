@@ -194,6 +194,9 @@ class AutoDLPlatform(TrainPlatform):
     def _job_stop_file(self, job_id: str) -> str:
         return f"{self._job_dir(job_id)}/stopped"
 
+    def _job_artifact_file(self, job_id: str) -> str:
+        return f"{self._job_dir(job_id)}/artifact.tar.gz"
+
     def _working_directory(self, job_config: dict[str, Any]) -> str | None:
         workdir = job_config.get("workdir") or os.environ.get("AUTODL_WORKDIR")
         if workdir is None:
@@ -326,3 +329,64 @@ class AutoDLPlatform(TrainPlatform):
             self._api().power_off(instance_uuid)
         if instance_uuid and os.environ.get("AUTODL_RELEASE_ON_STOP", "").strip().lower() in {"1", "true", "yes"}:
             self._api().release(instance_uuid)
+
+    def _prepare_artifact(self, runner_job_id: str, artifact_path: str) -> str:
+        tar_file = self._job_artifact_file(runner_job_id)
+        exit_status, _, stderr = self._exec(
+            f"mkdir -p {shlex.quote(self._job_dir(runner_job_id))}; "
+            f"if [ -d {shlex.quote(artifact_path)} ]; then "
+            f"tar -C {shlex.quote(artifact_path)} -czf {shlex.quote(tar_file)} .; "
+            f"elif [ -f {shlex.quote(artifact_path)} ]; then "
+            f"tar -C {shlex.quote(str(Path(artifact_path).parent))} "
+            f"-czf {shlex.quote(tar_file)} {shlex.quote(Path(artifact_path).name)}; "
+            "else exit 44; fi"
+        )
+        if exit_status == 44:
+            raise RuntimeError(f"AutoDL artifact path does not exist: {artifact_path}")
+        if exit_status != 0:
+            raise RuntimeError(f"AutoDL artifact tar failed: {stderr or 'unknown error'}")
+        return tar_file
+
+    def download_artifact_chunk(
+        self,
+        job_id: str,
+        artifact_path: str,
+        *,
+        offset: int = 0,
+        chunk_size: int = 1024 * 1024,
+    ) -> dict[str, str | int | bool]:
+        _, runner_job_id = self._split_job_ref(job_id)
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0")
+        if offset == 0:
+            tar_file = self._prepare_artifact(runner_job_id, artifact_path)
+        else:
+            tar_file = self._job_artifact_file(runner_job_id)
+            exit_status, _, _ = self._exec(f"test -f {shlex.quote(tar_file)}")
+            if exit_status != 0:
+                raise RuntimeError("AutoDL artifact archive is not prepared; retry with offset=0")
+        exit_status, stdout, stderr = self._exec(
+            f"size=$(wc -c < {shlex.quote(tar_file)} | tr -d ' '); "
+            f"data=$(dd if={shlex.quote(tar_file)} bs=1 skip={offset} count={chunk_size} 2>/dev/null | base64 | tr -d '\\n'); "
+            'printf "__SIZE__=%s\\n__DATA__=%s\\n" "$size" "$data"'
+        )
+        if exit_status != 0:
+            raise RuntimeError(f"AutoDL artifact read failed: {stderr or stdout or 'unknown error'}")
+        lines = stdout.splitlines()
+        size_line = next((line for line in lines if line.startswith("__SIZE__=")), "__SIZE__=0")
+        data_line = next((line for line in lines if line.startswith("__DATA__=")), "__DATA__=")
+        total_bytes = int(size_line.split("=", 1)[1] or "0")
+        data = data_line.split("=", 1)[1] if "=" in data_line else ""
+        next_offset = min(total_bytes, offset + chunk_size)
+        return {
+            "artifactPath": artifact_path,
+            "archivePath": tar_file,
+            "offset": offset,
+            "nextOffset": next_offset,
+            "chunkSize": chunk_size,
+            "totalBytes": total_bytes,
+            "done": next_offset >= total_bytes,
+            "dataBase64": data,
+        }
