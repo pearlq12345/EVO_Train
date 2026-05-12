@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
+USER_DATA_ROOT = "~/usrdata/%s" ## username
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 DOWNLOAD_TIMER_REFRESH_SECONDS = 60
 TAR_BLOCK_SIZE = 512
@@ -59,6 +60,21 @@ def _debug_missing_checkpoint_path(path: str) -> None:
     for parent_path in dict.fromkeys(parent_paths):
         _run_debug_command(["ls", "-lah", parent_path])
     _run_debug_command(["mount"])
+
+
+def _list_user_dataset_dirs(username: str) -> list[str]:
+    dataset_root = os.path.expanduser(USER_DATA_ROOT % username)
+    try:
+        return [
+            os.path.join(dataset_root, name)
+            for name in sorted(os.listdir(dataset_root))
+            if os.path.isdir(os.path.join(dataset_root, name))
+        ]
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        print(f"[数据集目录读取失败] {dataset_root}: {exc}")
+        return []
 
 
 def _start_training(request: dict[str, Any], username: str, task_name: str, tasks: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -259,7 +275,7 @@ def handle_request(text: str) -> dict[str, Any]:
     action = str(request.get("action") or "").strip()
     tasks = sql_get_user_all_task(username)
     if action == "任务同步":
-        return {"message": "sync success", "tasks": tasks}
+        return {"message": "sync success", "tasks": tasks, "datasetDir": _list_user_dataset_dirs(username)}
     if not username or not task_name:
         return {"message": "invalid request", "tasks": tasks}
     if action == "开始训练":
