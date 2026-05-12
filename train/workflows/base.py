@@ -6,11 +6,26 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class WorkflowStage:
+    name: str
+    command: str
+    required: bool = True
+
+    def to_response(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "command": self.command,
+            "required": self.required,
+        }
+
+
+@dataclass(frozen=True)
 class WorkflowPlan:
     workflow: str
     provider: str
     params: dict[str, Any]
     command: str
+    stages: list[WorkflowStage]
     workdir: str
     checkpoint_path: str
     dataset_path: str
@@ -29,6 +44,7 @@ class WorkflowPlan:
             "provider": self.provider,
             "params": self.params,
             "command": self.command,
+            "stages": [stage.to_response() for stage in self.stages],
             "workdir": self.workdir,
             "checkpointPath": self.checkpoint_path,
             "datasetPath": self.dataset_path,
@@ -76,6 +92,21 @@ def param_bool(params: dict[str, Any], key: str, default: bool = False) -> bool:
 
 def quote_args(parts: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in parts)
+
+
+def build_runner_command(stages: list[WorkflowStage]) -> str:
+    lines = [
+        "set -euo pipefail",
+        "export PYTHONUNBUFFERED=1",
+    ]
+    for stage in stages:
+        lines.append(f"echo __EVO_STAGE_START__={shlex.quote(stage.name)}")
+        if stage.required:
+            lines.append(stage.command)
+        else:
+            lines.append(f"{stage.command} || echo __EVO_STAGE_SKIPPED__={shlex.quote(stage.name)}")
+        lines.append(f"echo __EVO_STAGE_DONE__={shlex.quote(stage.name)}")
+    return "bash -lc " + shlex.quote("; ".join(lines))
 
 
 def estimate_hours(epochs: int, eval_episodes: int) -> int:

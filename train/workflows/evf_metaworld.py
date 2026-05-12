@@ -4,6 +4,8 @@ from typing import Any
 
 from .base import (
     WorkflowPlan,
+    WorkflowStage,
+    build_runner_command,
     estimate_hours,
     param_bool,
     param_float,
@@ -40,7 +42,19 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
         gpu_spec=gpu_spec,
     )
 
-    command_parts = [
+    prepare_data_command = quote_args(
+        [
+            "python",
+            "scripts/prepare_data.py",
+            "--benchmark",
+            "metaworld",
+            "--env-name",
+            env_name,
+            "--dataset-path",
+            dataset_path,
+        ]
+    )
+    train_parts = [
         "python",
         "train.py",
         "--benchmark",
@@ -63,7 +77,37 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
         str(eval_episodes),
     ]
     if save_video:
-        command_parts.append("--save-video")
+        train_parts.append("--save-video")
+    evaluate_command = quote_args(
+        [
+            "python",
+            "eval.py",
+            "--benchmark",
+            "metaworld",
+            "--env-name",
+            env_name,
+            "--checkpoint-path",
+            checkpoint_path,
+            "--eval-episodes",
+            str(eval_episodes),
+            "--output-path",
+            f"{checkpoint_path}/eval_info.json",
+        ]
+    )
+    collect_command = quote_args(
+        [
+            "python",
+            "scripts/collect_artifacts.py",
+            "--run-dir",
+            checkpoint_path,
+        ]
+    )
+    stages = [
+        WorkflowStage("prepare_data", prepare_data_command),
+        WorkflowStage("train", quote_args(train_parts)),
+        WorkflowStage("evaluate", evaluate_command),
+        WorkflowStage("collect_artifacts", collect_command, required=False),
+    ]
 
     return WorkflowPlan(
         workflow=WORKFLOW_NAME,
@@ -77,7 +121,8 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
             "evalEpisodes": eval_episodes,
             "saveVideo": save_video,
         },
-        command=quote_args(command_parts),
+        command=build_runner_command(stages),
+        stages=stages,
         workdir=workdir,
         checkpoint_path=checkpoint_path,
         dataset_path=dataset_path,

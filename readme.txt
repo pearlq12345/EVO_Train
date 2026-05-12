@@ -75,7 +75,7 @@ current request / response notes：
        请求：
        {"username":"u","action":"AI配置训练","message":"我想在metaworld上跑pick-place，20个epoch，训练后评估10个episode","provider":"autodl"}
        返回 plan：
-       workflow / provider / params / command / workdir / checkpointPath / datasetPath / gpuSpec /
+       workflow / provider / params / stages / command / workdir / checkpointPath / datasetPath / gpuSpec /
        hourlyPriceCents / estimatedHours / estimatedMinimumCostCents / missingFields / warnings /
        readyToStart / summary / needsConfirmation
      - 用户确认后，前端把 plan 的 workflow/params 交给 action="开始训练"。
@@ -160,7 +160,7 @@ enterprise api / platform account：
 workflow / recipe：
   1. 目标分层
      - RoboClaw 做用户对话和 AI planner：把自然语言转成 workflow + params
-     - EVO_Train 做训练执行引擎：把 workflow + params 转成 command，然后走 AutoDL/Aliyun provider
+     - EVO_Train 做训练执行引擎：把 workflow + params 转成多阶段 stages，再编译成受控 runner command，最后走 AutoDL/Aliyun provider
      - 用户不需要知道云厂商 token、SSH 地址、端口、密钥，也不需要自己拼复杂 command
 
   2. 当前内置 recipe
@@ -168,6 +168,9 @@ workflow / recipe：
        params: envName / epochs / batchSize / learningRate / seed / evalEpisodes / saveVideo
      - evf_libero
        params: suite / taskId / epochs / batchSize / learningRate / seed / evalEpisodes / saveVideo
+     - recipe 会生成统一 stages：
+       prepare_data -> train -> evaluate -> collect_artifacts
+       provider 仍执行单个 command，但 command 内部会打印 __EVO_STAGE_START__/__EVO_STAGE_DONE__，便于后续日志解析和状态展示。
 
   3. 推荐交互
      - 用户：我想在 metaworld pick-place 跑 20 个 epoch，训练完评估 SR

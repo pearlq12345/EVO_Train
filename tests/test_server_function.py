@@ -311,7 +311,12 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["plan"]["workflow"], "evf_metaworld")
         self.assertEqual(response["plan"]["params"]["envName"], "pick-place-v2")
         self.assertEqual(response["plan"]["params"]["epochs"], 20)
-        self.assertIn("--benchmark metaworld", response["plan"]["command"])
+        self.assertEqual(
+            [stage["name"] for stage in response["plan"]["stages"]],
+            ["prepare_data", "train", "evaluate", "collect_artifacts"],
+        )
+        self.assertIn("--benchmark metaworld", response["plan"]["stages"][1]["command"])
+        self.assertIn("__EVO_STAGE_START__", response["plan"]["command"])
         self.assertTrue(response["plan"]["needsConfirmation"])
         self.assertEqual(response["plan"]["missingFields"], [])
         self.assertEqual(response["plan"]["estimatedHours"], "1")
@@ -391,6 +396,7 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["message"], "create task success")
         self.assertEqual(response["tasks"][0]["provider"], "autodl")
         self.assertEqual(response["tasks"][0]["datasetPath"], "/root/autodl-tmp/datasets/libero/libero_object_task")
+        self.assertIn("__EVO_STAGE_START__", submitted_configs[0]["command"])
         self.assertIn("--benchmark libero", submitted_configs[0]["command"])
         self.assertIn("--task-id 2", submitted_configs[0]["command"])
         self.assertTrue(submitted_configs[0]["autodl_managed"])
