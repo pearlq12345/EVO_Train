@@ -148,10 +148,8 @@ def get_download_path(username: str, task_name: str) -> str:
     return f"{message}" + "|" + checkpoint_dir
 
 
-def _tar_stream_size(path: str) -> tuple[int, int, int]:
+def _tar_stream_size(path: str) -> int:
     tar_size = 0
-    file_size = 0
-    file_count = 0
     for root, _, filenames in os.walk(path):
         for filename in filenames:
             file_path = os.path.join(root, filename)
@@ -159,26 +157,84 @@ def _tar_stream_size(path: str) -> tuple[int, int, int]:
                 size = os.path.getsize(file_path)
             except FileNotFoundError:
                 continue
-            file_count += 1
-            file_size += size
             tar_size += TAR_BLOCK_SIZE
             tar_size += ((size + TAR_BLOCK_SIZE - 1) // TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE
     tar_size += TAR_BLOCK_SIZE * 2
     tar_size += (TAR_RECORD_SIZE - (tar_size % TAR_RECORD_SIZE)) % TAR_RECORD_SIZE
-    return tar_size, file_size, file_count
+    return tar_size
 
 
-def get_download_size(username: str, task_name: str) -> dict[str, Any]:
+def _checkpoint_id(name: str) -> str:
+    if name.isdigit():
+        return str(int(name))
+    return name
+
+
+def _list_checkpoints(checkpoint_dir: str) -> list[dict[str, Any]]:
+    checkpoints_dir = os.path.join(checkpoint_dir, "checkpoints")
+    if not os.path.isdir(checkpoints_dir):
+        return []
+    checkpoints: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(checkpoints_dir)):
+        path = os.path.join(checkpoints_dir, name)
+        if not os.path.isdir(path):
+            continue
+        checkpoints.append({
+            "id": _checkpoint_id(name),
+            "name": name,
+            "downloadSize": _tar_stream_size(path),
+        })
+    return checkpoints
+
+
+def _parse_download_list(value: Any) -> set[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = str(value or "").split(",")
+    return {str(item).strip() for item in raw_items if str(item).strip()}
+
+
+def _download_all_requested(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _selected_download_roots(download_path: str, request: dict[str, Any]) -> tuple[str, list[str]]:
+    if _download_all_requested(request.get("downloadAll", True)):
+        return "download all", [download_path]
+
+    requested_ids = _parse_download_list(request.get("downloadList"))
+    if not requested_ids:
+        return "download failed, no checkpoint selected.", []
+
+    selected_roots: list[str] = []
+    checkpoints_dir = os.path.join(download_path, "checkpoints")
+    for checkpoint in _list_checkpoints(download_path):
+        if str(checkpoint["id"]) not in requested_ids:
+            continue
+        path = os.path.join(checkpoints_dir, str(checkpoint["name"]))
+        if os.path.isdir(path):
+            selected_roots.append(path)
+    if not selected_roots:
+        return "download failed, selected checkpoint does not exist.", []
+    return "download selected", selected_roots
+
+
+def get_download_directory(username: str, task_name: str) -> dict[str, Any]:
     response = get_download_path(username, task_name)
     message, _, download_path = response.partition("|")
     if not download_path:
-        return {"message": message or "download path does not exist.", "downloadSize": 0, "fileSize": 0, "fileCount": 0}
-    tar_size, file_size, file_count = _tar_stream_size(download_path)
+        return {
+            "message": message or "download path does not exist.",
+            "downloadSize": 0,
+            "checkpoints": [],
+        }
     return {
-        "message": "download size ready",
-        "downloadSize": tar_size,
-        "fileSize": file_size,
-        "fileCount": file_count,
+        "message": "download directory ready",
+        "downloadSize": _tar_stream_size(download_path),
+        "checkpoints": _list_checkpoints(download_path),
     }
 
 # 这里设计的时候先考虑用阻塞的方案来解决：每次任务起来以后，只有等到任务创建成功/失败 任务删除成功/失败的时候才会返回。
@@ -207,10 +263,8 @@ def handle_request(text: str) -> dict[str, Any]:
         message, tasks = _stop_training(username, task_name)
     elif action == "删除任务":
         message, tasks = _delete_task(username, task_name)
-    elif action == "结果大小":
-        response = get_download_size(username, task_name)
-        response["tasks"] = tasks
-        return response
+    elif action == "查询下载目录":
+        return get_download_directory(username, task_name)
     else:
         message = "invalid action"
     return {"message": message, "tasks": tasks}
@@ -220,22 +274,25 @@ def handle_download_task(event: "TaskEvent") -> dict[str, str]:
     try:
         request = json.loads(event.request_text)
     except json.JSONDecodeError:
-        return {"message": "invalid json", "tasks": []}
+        return {"message": "invalid json"}
 
     username = str(request.get("username") or "").strip()
     task_name = str(request.get("taskName") or "").strip()
-    tasks = sql_get_user_all_task(username) if username else []
     if not username or not task_name:
         print(f"[结果下载失败] invalid request: {event.request_text}")
-        return {"message": "invalid request", "tasks": tasks}
+        return {"message": "invalid request"}
 
     response = get_download_path(username, task_name)
     message, _, download_path = response.partition("|")
     if not download_path:
         print(f"[结果下载失败] {message or 'download path does not exist.'}")
-        return {"message": message or "download path does not exist.", "tasks": tasks}
+        return {"message": message or "download path does not exist."}
+    select_message, selected_roots = _selected_download_roots(download_path, request)
+    if not selected_roots:
+        print(f"[结果下载失败] {select_message}")
+        return {"message": select_message}
 
-    print(f"[结果下载开始] {event.client_id}: {download_path}")
+    print(f"[结果下载开始] {event.client_id}: {download_path}, {select_message}: {selected_roots}")
     sock = event.client.socket
     old_timeout = sock.gettimeout()
     event.refresh_client_expire_time()
@@ -243,20 +300,21 @@ def handle_download_task(event: "TaskEvent") -> dict[str, str]:
     try:
         sock.setblocking(True)
         with sock.makefile("wb", buffering=DOWNLOAD_CHUNK_SIZE) as writer, tarfile.open(fileobj=writer, mode="w|") as tar:
-            for root, _, filenames in os.walk(download_path):
-                for filename in filenames:
-                    file_path = os.path.join(root, filename)
-                    arcname = os.path.relpath(file_path, download_path)
-                    try:
-                        tar.add(file_path, arcname=arcname, recursive=False)
-                    except FileNotFoundError:
-                        print(f"[结果下载跳过] file disappeared: {file_path}")
-                    delta_T = time.monotonic() - last_refresh_time
-                    if delta_T >= DOWNLOAD_TIMER_REFRESH_SECONDS:
-                        event.refresh_client_expire_time()
-                        last_refresh_time = time.monotonic()
+            for selected_root in selected_roots:
+                for root, _, filenames in os.walk(selected_root):
+                    for filename in filenames:
+                        file_path = os.path.join(root, filename)
+                        arcname = os.path.relpath(file_path, download_path)
+                        try:
+                            tar.add(file_path, arcname=arcname, recursive=False)
+                        except FileNotFoundError:
+                            print(f"[结果下载跳过] file disappeared: {file_path}")
+                        delta_T = time.monotonic() - last_refresh_time
+                        if delta_T >= DOWNLOAD_TIMER_REFRESH_SECONDS:
+                            event.refresh_client_expire_time()
+                            last_refresh_time = time.monotonic()
         print(f"[结果下载完成] {event.client_id}: {download_path}")
-        return {"message": message, "tasks": tasks}
+        return {"message": message}
     finally:
         event.refresh_client_expire_time()
         try:
