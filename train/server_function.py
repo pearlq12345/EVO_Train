@@ -97,6 +97,14 @@ def _query_status(username: str, task_name: str) -> str:
     return f"{task_name}: query status failed, job id dose not exist."
 
 
+def _query_user_logs(username: str, task_name: str) -> dict[str, Any]:
+    job_id = sql_get_user_jobid(username, task_name)
+    if not job_id:
+        return {"message": f"{task_name}: query logs failed, job id does not exist.", "logs": []}
+    this_req = PaiRequest("", job_id)
+    return {"message": "query user logs success", "logs": this_req.query_user_logs(200)}
+
+
 def _stop_training(username: str, task_name: str) -> tuple[str, list[dict[str, str]]]:
     job_id = sql_get_user_jobid(username, task_name)
     if job_id:
@@ -290,6 +298,10 @@ def handle_request(text: str) -> dict[str, Any]:
         message, tasks = _delete_task(username, task_name)
     elif action == "查询下载目录":
         return get_download_directory(username, task_name)
+    elif action == "请求用户日志":
+        response = _query_user_logs(username, task_name)
+        response["tasks"] = tasks
+        return response
     else:
         message = "invalid action"
     return {"message": message, "tasks": tasks}

@@ -3,7 +3,7 @@
 from __future__ import annotations
 import os
 from alibabacloud_pai_dlc20201203.client import Client
-from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, GetWebTerminalRequest, JobSpec, ResourceConfig, StopJobRequest
+from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobRequestDataSources, CreateJobRequestUserVpc, GetJobRequest, GetPodLogsRequest, GetWebTerminalRequest, JobSpec, ResourceConfig, StopJobRequest
 from alibabacloud_tea_openapi.models import Config
 
 DEFAULT_REGION = "cn-hangzhou"
@@ -152,3 +152,15 @@ class PaiRequest:
             GetWebTerminalRequest(is_shared=True),
         )
         return f"{self.status}, Link: {response.body.web_terminal_url}"
+
+    def query_user_logs(self, max_lines: int = 200) -> list[str]:
+        job = self.client.get_job(self.job_id, GetJobRequest()).body
+        if not job.pods:
+            return []
+        pod_id = job.pods[0].pod_id
+        response = self.client.get_pod_logs(
+            self.job_id,
+            pod_id,
+            GetPodLogsRequest(max_lines=max_lines),
+        )
+        return list(response.body.logs or [])
