@@ -171,8 +171,73 @@ class ServerFunctionTests(unittest.TestCase):
             )
 
         self.assertEqual(response["message"], "sync success")
+        self.assertIn("datasetDir", response)
         self.assertEqual(response["tasks"][0]["status"], "Running")
         self.assertEqual(response["tasks"][0]["jobId"], "job-234")
+
+    def test_query_status_refreshes_single_task_for_upstream_compatibility(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        self.assertTrue(sql_pack.sql_freeze_user_balance("pearl", "run-status", 1000, "test setup"))
+        self.assertTrue(
+            sql_pack.sql_add_user_task(
+                "pearl",
+                "run-status",
+                status="Submitted",
+                provider="aliyun",
+                remote_job_id="job-status",
+                hourly_price_cents=1000,
+                frozen_until=sql_pack.add_hours_text(sql_pack.utc_now_text(), 1),
+                started_at=sql_pack.utc_now_text(),
+                billing_status="frozen",
+            )
+        )
+
+        with (
+            patch.object(server_function.start_train, "load_env"),
+            patch.object(server_function.start_train, "create_client", return_value=object()),
+            patch.object(server_function.start_train, "fetch_job_body", return_value=_job_body(job_id="job-status", status="Running")),
+        ):
+            response = server_function.handle_request(
+                json.dumps(
+                    {"username": "pearl", "taskName": "run-status", "action": "查询状态"},
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "run-status: Running")
+        self.assertEqual(response["tasks"][0]["status"], "Running")
+
+    def test_query_download_directory_and_logs_match_upstream_actions(self) -> None:
+        self.assertTrue(
+            sql_pack.sql_add_user_task(
+                "pearl",
+                "run-files",
+                status="Failed",
+                provider="autodl",
+                remote_job_id="instance-1::runner-1",
+                checkpoint_path="/root/autodl-tmp/evo_train/output/run-files",
+                last_error="line one\nline two",
+            )
+        )
+
+        directory = server_function.handle_request(
+            json.dumps(
+                {"username": "pearl", "taskName": "run-files", "action": "查询下载目录"},
+                ensure_ascii=False,
+            )
+        )
+        logs = server_function.handle_request(
+            json.dumps(
+                {"username": "pearl", "taskName": "run-files", "action": "请求用户日志"},
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(directory["message"], "query download directory success")
+        self.assertEqual(directory["downloadPath"], "/root/autodl-tmp/evo_train/output/run-files")
+        self.assertEqual(directory["checkpoints"], ["/root/autodl-tmp/evo_train/output/run-files"])
+        self.assertEqual(logs["message"], "query user logs success")
+        self.assertEqual(logs["logs"], ["line one", "line two"])
 
     def test_stop_training_marks_remote_task_stopped(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 2000)

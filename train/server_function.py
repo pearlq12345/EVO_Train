@@ -46,7 +46,19 @@ TERMINAL_INSTANCE_STATUSES = {
     "Instance:not_found",
 }
 ADMIN_ACTIONS = {"管理员充值", "价格设置", "平台余额查询"}
-USER_ACTIONS = {"余额查询", "账单查询", "任务同步", "开始训练", "结束训练", "删除任务", "结果下载", "AI配置训练"}
+USER_ACTIONS = {
+    "余额查询",
+    "账单查询",
+    "任务同步",
+    "开始训练",
+    "结束训练",
+    "删除任务",
+    "结果下载",
+    "AI配置训练",
+    "查询状态",
+    "查询下载目录",
+    "请求用户日志",
+}
 
 
 def _is_terminal_status(status: str) -> bool:
@@ -447,6 +459,69 @@ def _download_task_artifact(username: str, task_name: str, request: dict[str, An
     return response
 
 
+def _list_user_dataset_dirs(username: str) -> list[str]:
+    """Return local dataset directory names in the shape used by upstream EVO-Train."""
+    root_template = os.environ.get("EVO_TRAIN_USER_DATA_ROOT", "~/usrdata/{username}")
+    root_path = os.path.expanduser(root_template.format(username=username))
+    if not os.path.isdir(root_path):
+        return []
+    try:
+        return sorted(
+            name
+            for name in os.listdir(root_path)
+            if os.path.isdir(os.path.join(root_path, name))
+        )
+    except OSError:
+        return []
+
+
+def _status_response(username: str, task_name: str, request: dict[str, Any]) -> dict[str, Any]:
+    task = sql_get_user_task(username, task_name)
+    if task is None:
+        return _with_wallet(username, f"{task_name}: query status failed, job id does not exist.", sql_get_user_all_task(username))
+
+    task["username"] = username
+    try:
+        _refresh_platform_task(task, env_file=_request_optional_string(request, "envFile"), region=_request_optional_string(request, "region"))
+    except (SystemExit, Exception) as exc:
+        sql_update_user_task(username, task_name, last_error=str(exc))
+        return _with_wallet(username, f"{task_name}: query status failed: {exc}", sql_get_user_all_task(username))
+
+    refreshed = sql_get_user_task(username, task_name) or task
+    message = f"{task_name}: {refreshed.get('status', '')}".strip()
+    return _with_wallet(username, message, sql_get_user_all_task(username))
+
+
+def _download_directory_response(username: str, task_name: str) -> dict[str, Any]:
+    task = sql_get_user_task(username, task_name)
+    if task is None:
+        response = _with_wallet(username, f"{task_name}: query download directory failed, job id does not exist.", sql_get_user_all_task(username))
+        response["downloadPath"] = ""
+        response["downloadSize"] = 0
+        response["checkpoints"] = []
+        return response
+
+    download_path = task.get("checkpointPath", "")
+    response = _with_wallet(username, "query download directory success" if download_path else "query download directory failed", sql_get_user_all_task(username))
+    response["downloadPath"] = download_path
+    response["downloadSize"] = 0
+    response["checkpoints"] = [download_path] if download_path else []
+    return response
+
+
+def _user_logs_response(username: str, task_name: str) -> dict[str, Any]:
+    task = sql_get_user_task(username, task_name)
+    if task is None:
+        response = _with_wallet(username, f"{task_name}: query logs failed, job id does not exist.", sql_get_user_all_task(username))
+        response["logs"] = []
+        return response
+
+    last_error = task.get("error", "")
+    response = _with_wallet(username, "query user logs success", sql_get_user_all_task(username))
+    response["logs"] = last_error.splitlines() if last_error else []
+    return response
+
+
 def _wallet_response(username: str) -> dict[str, Any]:
     return {
         "message": "wallet query success",
@@ -587,7 +662,9 @@ def handle_request(text: str) -> dict[str, Any]:
         return _ai_training_plan_response(username, request)
 
     if action == "任务同步":
-        return _with_wallet(username, "sync success", _refresh_user_tasks(username, request))
+        response = _with_wallet(username, "sync success", _refresh_user_tasks(username, request))
+        response["datasetDir"] = _list_user_dataset_dirs(username)
+        return response
 
     if not username or not task_name:
         return {"message": "invalid request", "tasks": sql_get_user_all_task(username)}
@@ -598,6 +675,12 @@ def handle_request(text: str) -> dict[str, Any]:
         message, tasks = _stop_task(username, task_name, request)
     elif action == "结果下载":
         return _download_task_artifact(username, task_name, request)
+    elif action == "查询状态":
+        return _status_response(username, task_name, request)
+    elif action == "查询下载目录":
+        return _download_directory_response(username, task_name)
+    elif action == "请求用户日志":
+        return _user_logs_response(username, task_name)
     elif action == "删除任务":
         message = "delete task success" if sql_delete_user_task(username, task_name) else "delete task failed"
         tasks = sql_get_user_all_task(username)
