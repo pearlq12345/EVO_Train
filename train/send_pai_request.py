@@ -7,7 +7,7 @@ from alibabacloud_pai_dlc20201203.models import CreateJobRequest, CreateJobReque
 from alibabacloud_tea_openapi.models import Config
 from param.env_param import *
 DEFAULT_DATA_SOURCES = [
-    CreateJobRequestDataSources(data_source_id=OSS_CODE_DATA_SOURCE_ID, mount_path=PAI_MOUNT_PATH_OF_CODE),
+    # CreateJobRequestDataSources(data_source_id=OSS_CODE_DATA_SOURCE_ID, mount_path=PAI_MOUNT_PATH_OF_CODE),
     CreateJobRequestDataSources(uri=NAS_MODEL_RESULT_URI, mount_path=PAI_MOUNT_PATH_OF_MODEL_RESULT, mount_access="RW"),
 ]
 # DEFAULT_DATA_SOURCES = [
