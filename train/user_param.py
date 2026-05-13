@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Build user training commands."""
 from __future__ import annotations
-
 from typing import Any
 
 
@@ -13,9 +12,10 @@ class UserTrainCmd:
     DEFAULT_POLICY_TYPE = "act"
     POLICY_PUSH_TO_HUB = "false"
     POLICY_REPO_ID = "local/libero_10_no_noops_1.0.0_lerobot"
-    OUTPUT_DIR = "/usrresult/%s/%s/checkpoint" ## username task_name
     POLICY_DEVICE = "cuda"
     POLICY_PRETRAINED_BACKBONE_WEIGHTS = "null"
+    OUTPUT_DIR = "/usrresult/%s/%s/checkpoint" ## username task_name
+    LOSS_OUTPUT_DIR = "/usrresult/%s/%s/loss/loss.txt" ## username task_name
 
     def __init__(self, request: dict[str, Any]) -> None:
         # self.dataset_path = str(request.get("datasetPath") or self.DEFAULT_DATASET_ROOT)
@@ -36,7 +36,6 @@ class UserTrainCmd:
     def create_train_cmd(self, usrname: str, jobname: str) -> str:
         if self.empty_docker:
             return f"sleep {self.sleep_t}"
-        output_dir = self.OUTPUT_DIR % (usrname, jobname)
         return (
             f"{self.COMMAND} "
             f"--dataset.repo_id={self.DATASET_REPO_ID} "
@@ -45,11 +44,12 @@ class UserTrainCmd:
             f"--policy.type={self.policy_type} "
             f"--policy.push_to_hub={self.POLICY_PUSH_TO_HUB} "
             f"--policy.repo_id={self.POLICY_REPO_ID} "
-            f"--output_dir={output_dir} "
             f"--steps={self.steps} "
             f"--save_freq={self.save_freq} "
             f"--batch_size={self.batch_size} "
             f"--log_freq={self.log_freq} "
             f"--policy.device={self.POLICY_DEVICE} "
             f"--policy.pretrained_backbone_weights={self.POLICY_PRETRAINED_BACKBONE_WEIGHTS}"
+            f"--output_dir={self.OUTPUT_DIR % (usrname, jobname)} "
+            f"--loss_file_outputdir={self.LOSS_OUTPUT_DIR % (usrname, jobname)}"
         )
