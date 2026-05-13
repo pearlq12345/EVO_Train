@@ -7,6 +7,7 @@ import argparse
 import hmac
 import json
 import os
+from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
 from sql_lite.sql_pack import (
@@ -58,7 +59,75 @@ USER_ACTIONS = {
     "查询状态",
     "查询下载目录",
     "请求用户日志",
+    "GPU规格查询",
 }
+
+
+DEFAULT_AUTODL_SKUS = [
+    {
+        "skuId": "autodl-h800-80g",
+        "provider": "autodl",
+        "displayName": "H800 80G",
+        "gpuSpec": "h800-80g",
+        "autodlGpuSpecUuid": "h800",
+        "gpuCount": 1,
+        "enabled": True,
+    },
+    {
+        "skuId": "autodl-4090-48g",
+        "provider": "autodl",
+        "displayName": "RTX 4090 48G",
+        "gpuSpec": "4090-48g",
+        "autodlGpuSpecUuid": "v-48g",
+        "gpuCount": 1,
+        "enabled": True,
+    },
+    {
+        "skuId": "autodl-pro6000-96g",
+        "provider": "autodl",
+        "displayName": "PRO6000 96G",
+        "gpuSpec": "pro6000-96g",
+        "autodlGpuSpecUuid": "pro6000-p",
+        "gpuCount": 1,
+        "enabled": True,
+    },
+    {
+        "skuId": "autodl-4080s-32g",
+        "provider": "autodl",
+        "displayName": "RTX 4080(S) 32G",
+        "gpuSpec": "4080s-32g",
+        "autodlGpuSpecUuid": "v-32g-p",
+        "gpuCount": 1,
+        "enabled": True,
+    },
+    {
+        "skuId": "autodl-3090-48g",
+        "provider": "autodl",
+        "displayName": "RTX 3090 48G",
+        "gpuSpec": "3090-48g",
+        "autodlGpuSpecUuid": "v-48g-350w",
+        "gpuCount": 1,
+        "enabled": True,
+    },
+    {
+        "skuId": "autodl-5090-32g",
+        "provider": "autodl",
+        "displayName": "RTX 5090 32G",
+        "gpuSpec": "5090-32g",
+        "autodlGpuSpecUuid": "5090-p",
+        "gpuCount": 1,
+        "enabled": True,
+    },
+    {
+        "skuId": "autodl-4090d",
+        "provider": "autodl",
+        "displayName": "RTX 4090D",
+        "gpuSpec": "4090d",
+        "autodlGpuSpecUuid": "4090D",
+        "gpuCount": 1,
+        "enabled": True,
+    },
+]
 
 
 def _is_terminal_status(status: str) -> bool:
@@ -133,6 +202,121 @@ def _env_bool(name: str, *, default: bool = False) -> bool:
     if value is None or value == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _service_fee_rate() -> Decimal:
+    raw = os.environ.get("EVO_TRAIN_SERVICE_FEE_RATE", "0.10")
+    try:
+        rate = Decimal(raw)
+    except Exception:
+        rate = Decimal("0.10")
+    return max(rate, Decimal("0"))
+
+
+def _sale_price_from_cost(cost_cents: int) -> int:
+    if cost_cents <= 0:
+        return 0
+    multiplier = Decimal("1") + _service_fee_rate()
+    return int((Decimal(cost_cents) * multiplier).quantize(Decimal("1"), rounding=ROUND_CEILING))
+
+
+def _load_autodl_skus() -> list[dict[str, Any]]:
+    raw = os.environ.get("AUTODL_GPU_SKUS_JSON")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid AUTODL_GPU_SKUS_JSON: {exc}") from exc
+        if not isinstance(parsed, list):
+            raise ValueError("AUTODL_GPU_SKUS_JSON must be a JSON array")
+        skus = [dict(item) for item in parsed if isinstance(item, dict)]
+    else:
+        skus = [dict(item) for item in DEFAULT_AUTODL_SKUS]
+
+    default_image_uuid = os.environ.get("AUTODL_IMAGE_UUID", "")
+    default_cuda_v_from = os.environ.get("AUTODL_CUDA_V_FROM", "")
+    default_data_centers = os.environ.get("AUTODL_DATA_CENTER_LIST", "")
+    for sku in skus:
+        sku.setdefault("provider", "autodl")
+        sku.setdefault("enabled", True)
+        if default_image_uuid and not sku.get("autodlImageUuid"):
+            sku["autodlImageUuid"] = default_image_uuid
+        if default_cuda_v_from and not sku.get("cudaVFrom"):
+            sku["cudaVFrom"] = int(default_cuda_v_from)
+        if default_data_centers and not sku.get("autodlDataCenters"):
+            sku["autodlDataCenters"] = default_data_centers
+        cost = int(sku.get("costHourlyCents") or 0)
+        if cost > 0 and not sku.get("hourlyPriceCents"):
+            sku["hourlyPriceCents"] = _sale_price_from_cost(cost)
+    return skus
+
+
+def _public_sku(sku: dict[str, Any]) -> dict[str, str | bool]:
+    cost = int(sku.get("costHourlyCents") or 0)
+    sale = int(sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or 0)
+    response: dict[str, str | bool] = {
+        "skuId": str(sku.get("skuId") or ""),
+        "provider": str(sku.get("provider") or "autodl"),
+        "displayName": str(sku.get("displayName") or sku.get("gpuSpec") or sku.get("skuId") or ""),
+        "gpuSpec": str(sku.get("gpuSpec") or sku.get("skuId") or ""),
+        "gpuCount": str(sku.get("gpuCount") or 1),
+        "hourlyPriceCents": str(sale),
+        "serviceFeeRate": str(_service_fee_rate()),
+        "enabled": bool(sku.get("enabled", True)),
+    }
+    if cost > 0:
+        response["costHourlyCents"] = str(cost)
+    return response
+
+
+def _gpu_sku_response(request: dict[str, Any]) -> dict[str, Any]:
+    provider = normalize_provider(_request_optional_string(request, "provider") or "autodl")
+    include_disabled = _request_bool(request, "includeDisabled")
+    try:
+        skus = [
+            _public_sku(sku)
+            for sku in _load_autodl_skus()
+            if normalize_provider(str(sku.get("provider") or "autodl")) == provider
+            and (include_disabled or bool(sku.get("enabled", True)))
+        ]
+    except ValueError as exc:
+        return {"message": f"gpu sku query failed: {exc}", "provider": provider, "skus": []}
+    return {"message": "gpu sku query success", "provider": provider, "skus": skus}
+
+
+def _find_autodl_sku(request: dict[str, Any]) -> dict[str, Any] | None:
+    sku_id = _request_optional_string(request, "skuId")
+    gpu_spec = _request_optional_string(request, "gpuSpec")
+    if not sku_id and not gpu_spec:
+        return None
+    for sku in _load_autodl_skus():
+        if not bool(sku.get("enabled", True)):
+            continue
+        if sku_id and str(sku.get("skuId") or "") == sku_id:
+            return sku
+        if gpu_spec and str(sku.get("gpuSpec") or "") == gpu_spec:
+            return sku
+    return None
+
+
+def _apply_autodl_sku(request: dict[str, Any]) -> dict[str, Any]:
+    if normalize_provider(_request_optional_string(request, "provider") or "aliyun") != "autodl":
+        return request
+    sku = _find_autodl_sku(request)
+    if sku is None:
+        if _request_optional_string(request, "skuId"):
+            raise ValueError(f"unknown or disabled AutoDL skuId: {_request_string(request, 'skuId')}")
+        return request
+    enriched = dict(request)
+    enriched["gpuSpec"] = sku.get("gpuSpec") or enriched.get("gpuSpec")
+    enriched["gpuCount"] = sku.get("gpuCount") or enriched.get("gpuCount") or 1
+    enriched["autodlGpuSpecUuid"] = sku.get("autodlGpuSpecUuid") or enriched.get("autodlGpuSpecUuid")
+    enriched["autodlImageUuid"] = sku.get("autodlImageUuid") or enriched.get("autodlImageUuid")
+    enriched["autodlDataCenters"] = sku.get("autodlDataCenters") or enriched.get("autodlDataCenters")
+    enriched["cudaVFrom"] = sku.get("cudaVFrom") or enriched.get("cudaVFrom")
+    cost = int(sku.get("costHourlyCents") or 0)
+    enriched["hourlyPriceCents"] = sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or enriched.get("hourlyPriceCents")
+    return enriched
 
 
 def _request_mounts(request: dict[str, Any]) -> list[str] | None:
@@ -216,6 +400,7 @@ def _build_job_config(request: dict[str, Any], task_name: str, provider: str) ->
         "autodl_gpu_spec_uuid": _request_optional_string(request, "autodlGpuSpecUuid"),
         "autodl_image_uuid": _request_optional_string(request, "autodlImageUuid"),
         "autodl_data_centers": _request_optional_string(request, "autodlDataCenters"),
+        "autodl_cuda_v_from": _request_int(request, "cudaVFrom"),
         "expand_system_disk_by_gb": _request_int(request, "expandSystemDiskGb"),
     }
 
@@ -230,6 +415,7 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
         )
     try:
         request = materialize_training_request(request)
+        request = _apply_autodl_sku(request)
     except (ValueError, TypeError) as exc:
         return f"create task failed: {exc}", sql_get_user_all_task(username)
 
@@ -648,6 +834,8 @@ def handle_request(text: str) -> dict[str, Any]:
         return _price_response(request)
     if action == "平台余额查询":
         return _platform_balance_response(request)
+    if action == "GPU规格查询":
+        return _gpu_sku_response(request)
 
     if action in {"余额查询", "账单查询", "管理员充值"} and not username:
         return {"message": "invalid request", "tasks": []}

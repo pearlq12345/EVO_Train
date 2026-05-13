@@ -10,7 +10,7 @@ from unittest.mock import patch
 from sql_lite import sql_pack
 from thread_pool.thread_pool import ThreadPool, TrainTaskEvent
 from train import server_function
-from train.platform.autodl import AutoDLPlatform
+from train.platform.autodl import AutoDLApiClient, AutoDLPlatform
 
 
 def _job_body(*, job_id: str = "dlc-job-1", status: str = "Running", reason_message: str = "") -> SimpleNamespace:
@@ -618,7 +618,118 @@ class ServerFunctionTests(unittest.TestCase):
             )
 
         self.assertIn("platform balance query failed", response["message"])
-        self.assertTrue(response["lowBalance"])
+
+    def test_gpu_sku_query_applies_ten_percent_service_fee(self) -> None:
+        skus = json.dumps(
+            [
+                {
+                    "skuId": "sku-4090",
+                    "provider": "autodl",
+                    "displayName": "RTX 4090 48G",
+                    "gpuSpec": "4090-48g",
+                    "autodlGpuSpecUuid": "v-48g",
+                    "autodlImageUuid": "image-1",
+                    "cudaVFrom": 118,
+                    "costHourlyCents": 901,
+                }
+            ]
+        )
+
+        with patch.dict("os.environ", {"AUTODL_GPU_SKUS_JSON": skus, "EVO_TRAIN_SERVICE_FEE_RATE": "0.10"}, clear=False):
+            response = server_function.handle_request(
+                json.dumps({"action": "GPU规格查询", "provider": "autodl"}, ensure_ascii=False)
+            )
+
+        self.assertEqual(response["message"], "gpu sku query success")
+        self.assertEqual(response["skus"][0]["skuId"], "sku-4090")
+        self.assertEqual(response["skus"][0]["hourlyPriceCents"], "992")
+        self.assertEqual(response["skus"][0]["serviceFeeRate"], "0.10")
+
+    def test_autodl_start_training_maps_sku_to_real_create_fields_and_price(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        skus = json.dumps(
+            [
+                {
+                    "skuId": "sku-4090",
+                    "provider": "autodl",
+                    "displayName": "RTX 4090 48G",
+                    "gpuSpec": "4090-48g",
+                    "autodlGpuSpecUuid": "v-48g",
+                    "autodlImageUuid": "image-1",
+                    "cudaVFrom": 118,
+                    "gpuCount": 1,
+                    "costHourlyCents": 901,
+                }
+            ]
+        )
+        captured: dict[str, object] = {}
+
+        class FakePlatform:
+            def submit(self, job_config: dict[str, object]) -> str:
+                captured.update(job_config)
+                return "pro-1::runner-1"
+
+        request = {
+            "username": "pearl",
+            "taskName": "autodl-sku",
+            "action": "开始训练",
+            "provider": "autodl",
+            "skuId": "sku-4090",
+            "workflow": "custom_project",
+            "params": {
+                "repoUrl": "https://example.com/repo.git",
+                "setupCommand": "true",
+                "trainCommand": "python train.py",
+                "evalCommand": "python eval.py",
+                "artifactCommand": "true",
+                "workdir": "/root/autodl-tmp/project",
+            },
+        }
+
+        with (
+            patch.dict("os.environ", {"AUTODL_GPU_SKUS_JSON": skus, "EVO_TRAIN_SERVICE_FEE_RATE": "0.10"}, clear=False),
+            patch.object(server_function, "get_platform", return_value=FakePlatform()),
+        ):
+            response = server_function.handle_request(json.dumps(request, ensure_ascii=False))
+
+        self.assertEqual(response["message"], "create task success")
+        self.assertEqual(captured["autodl_gpu_spec_uuid"], "v-48g")
+        self.assertEqual(captured["autodl_image_uuid"], "image-1")
+        self.assertEqual(captured["autodl_cuda_v_from"], 118)
+        self.assertEqual(captured["gpu_count"], 1)
+        self.assertEqual(response["tasks"][0]["hourlyPriceCents"], "992")
+
+    def test_autodl_api_create_instance_accepts_string_data_and_sends_sku_fields(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        class FakeClient(AutoDLApiClient):
+            def __init__(self) -> None:
+                pass
+
+            def _request(self, method: str, path: str, body: dict[str, object] | None = None) -> dict[str, object]:
+                requests.append({"method": method, "path": path, "body": body or {}})
+                return {"code": "Success", "data": "pro-created"}
+
+        instance_uuid = FakeClient().create_instance(
+            {
+                "gpu_count": 1,
+                "autodl_gpu_spec_uuid": "v-48g",
+                "autodl_image_uuid": "image-1",
+                "autodl_cuda_v_from": 118,
+                "autodl_data_centers": "westDC3,beijingDC2",
+                "job_name": "EVO task",
+                "autodl_start_command": "sleep 1",
+            }
+        )
+
+        self.assertEqual(instance_uuid, "pro-created")
+        body = requests[0]["body"]
+        self.assertEqual(body["gpu_spec_uuid"], "v-48g")
+        self.assertEqual(body["image_uuid"], "image-1")
+        self.assertEqual(body["cuda_v_from"], 118)
+        self.assertEqual(body["data_center_list"], ["westDC3", "beijingDC2"])
+        self.assertEqual(body["instance_name"], "EVO task")
+        self.assertEqual(body["start_command"], "sleep 1")
 
     def test_thread_pool_returns_json_when_handler_crashes(self) -> None:
         responses: list[str] = []

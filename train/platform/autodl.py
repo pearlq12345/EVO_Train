@@ -90,11 +90,22 @@ class AutoDLApiClient:
                 job_config.get("expand_system_disk_by_gb") or os.environ.get("AUTODL_EXPAND_SYSTEM_DISK_GB", "0")
             ),
         }
+        cuda_v_from = job_config.get("autodl_cuda_v_from") or os.environ.get("AUTODL_CUDA_V_FROM")
+        if cuda_v_from is not None and cuda_v_from != "":
+            body["cuda_v_from"] = int(cuda_v_from)
+        instance_name = optional_string(job_config, "instance_name") or optional_string(job_config, "job_name")
+        if instance_name:
+            body["instance_name"] = instance_name
+        start_command = optional_string(job_config, "autodl_start_command")
+        if start_command:
+            body["start_command"] = start_command
         data_centers = optional_string(job_config, "autodl_data_centers") or os.environ.get("AUTODL_DATA_CENTER_LIST")
         if data_centers:
             body["data_center_list"] = [item.strip() for item in data_centers.split(",") if item.strip()]
         payload = self._request("POST", "/api/v1/dev/instance/pro/create", body)
         data = payload.get("data") or {}
+        if isinstance(data, str):
+            return data
         instance_uuid = data.get("instance_uuid") or data.get("uuid")
         if not instance_uuid:
             raise RuntimeError(f"AutoDL create response did not include instance uuid: {data}")
