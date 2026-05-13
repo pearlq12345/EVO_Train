@@ -644,6 +644,22 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["skus"][0]["skuId"], "sku-4090")
         self.assertEqual(response["skus"][0]["hourlyPriceCents"], "992")
         self.assertEqual(response["skus"][0]["serviceFeeRate"], "0.10")
+        self.assertTrue(response["skus"][0]["readyToStart"])
+
+    def test_gpu_sku_query_hides_incomplete_default_skus(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            response = server_function.handle_request(
+                json.dumps({"action": "GPU规格查询", "provider": "autodl"}, ensure_ascii=False)
+            )
+
+        self.assertEqual(response["message"], "gpu sku query success")
+        self.assertEqual(response["skus"], [])
+
+        debug_response = server_function.handle_request(
+            json.dumps({"action": "GPU规格查询", "provider": "autodl", "includeIncomplete": True}, ensure_ascii=False)
+        )
+        self.assertGreater(len(debug_response["skus"]), 0)
+        self.assertFalse(debug_response["skus"][0]["readyToStart"])
 
     def test_autodl_start_training_maps_sku_to_real_create_fields_and_price(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 2000)
@@ -698,6 +714,41 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(captured["autodl_cuda_v_from"], 118)
         self.assertEqual(captured["gpu_count"], 1)
         self.assertEqual(response["tasks"][0]["hourlyPriceCents"], "992")
+
+    def test_autodl_start_training_rejects_incomplete_sku_before_billing(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        skus = json.dumps(
+            [
+                {
+                    "skuId": "sku-incomplete",
+                    "provider": "autodl",
+                    "displayName": "RTX 4090 48G",
+                    "gpuSpec": "4090-48g",
+                    "autodlGpuSpecUuid": "v-48g",
+                    "costHourlyCents": 900,
+                }
+            ]
+        )
+        request = {
+            "username": "pearl",
+            "taskName": "autodl-bad-sku",
+            "action": "开始训练",
+            "provider": "autodl",
+            "skuId": "sku-incomplete",
+            "workflow": "custom_project",
+            "params": {
+                "repoUrl": "https://example.com/repo.git",
+                "trainCommand": "python train.py",
+            },
+        }
+
+        with patch.dict("os.environ", {"AUTODL_GPU_SKUS_JSON": skus}, clear=False):
+            response = server_function.handle_request(json.dumps(request, ensure_ascii=False))
+
+        self.assertIn("AutoDL sku is missing required fields", response["message"])
+        wallet = sql_pack.sql_get_wallet("pearl")
+        self.assertEqual(wallet["balanceCents"], "2000")
+        self.assertEqual(wallet["frozenCents"], "0")
 
     def test_autodl_api_create_instance_accepts_string_data_and_sends_sku_fields(self) -> None:
         requests: list[dict[str, object]] = []

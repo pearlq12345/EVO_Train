@@ -254,6 +254,7 @@ def _load_autodl_skus() -> list[dict[str, Any]]:
 def _public_sku(sku: dict[str, Any]) -> dict[str, str | bool]:
     cost = int(sku.get("costHourlyCents") or 0)
     sale = int(sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or 0)
+    ready_to_start = _sku_ready_to_start(sku)
     response: dict[str, str | bool] = {
         "skuId": str(sku.get("skuId") or ""),
         "provider": str(sku.get("provider") or "autodl"),
@@ -263,21 +264,35 @@ def _public_sku(sku: dict[str, Any]) -> dict[str, str | bool]:
         "hourlyPriceCents": str(sale),
         "serviceFeeRate": str(_service_fee_rate()),
         "enabled": bool(sku.get("enabled", True)),
+        "readyToStart": ready_to_start,
     }
     if cost > 0:
         response["costHourlyCents"] = str(cost)
     return response
 
 
+def _sku_ready_to_start(sku: dict[str, Any]) -> bool:
+    if not bool(sku.get("enabled", True)):
+        return False
+    required = ("autodlGpuSpecUuid", "autodlImageUuid", "cudaVFrom")
+    if any(sku.get(field) in (None, "") for field in required):
+        return False
+    cost = int(sku.get("costHourlyCents") or 0)
+    sale = int(sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or 0)
+    return sale > 0
+
+
 def _gpu_sku_response(request: dict[str, Any]) -> dict[str, Any]:
     provider = normalize_provider(_request_optional_string(request, "provider") or "autodl")
     include_disabled = _request_bool(request, "includeDisabled")
+    include_incomplete = _request_bool(request, "includeIncomplete")
     try:
         skus = [
             _public_sku(sku)
             for sku in _load_autodl_skus()
             if normalize_provider(str(sku.get("provider") or "autodl")) == provider
             and (include_disabled or bool(sku.get("enabled", True)))
+            and (include_incomplete or _sku_ready_to_start(sku))
         ]
     except ValueError as exc:
         return {"message": f"gpu sku query failed: {exc}", "provider": provider, "skus": []}
@@ -316,6 +331,15 @@ def _apply_autodl_sku(request: dict[str, Any]) -> dict[str, Any]:
     enriched["cudaVFrom"] = sku.get("cudaVFrom") or enriched.get("cudaVFrom")
     cost = int(sku.get("costHourlyCents") or 0)
     enriched["hourlyPriceCents"] = sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or enriched.get("hourlyPriceCents")
+    missing = [
+        field
+        for field in ("autodlGpuSpecUuid", "autodlImageUuid", "cudaVFrom")
+        if enriched.get(field) in (None, "")
+    ]
+    if missing and not _request_optional_string(enriched, "autodlInstanceUuid"):
+        raise ValueError(f"AutoDL sku is missing required fields: {', '.join(missing)}")
+    if int(enriched.get("hourlyPriceCents") or 0) <= 0:
+        raise ValueError("AutoDL sku is missing hourly price")
     return enriched
 
 
