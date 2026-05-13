@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 TASK_OUTPUT_DIR = "/mnt/usrresult/%s/%s" ## username task_name
 CHECKPOINT_OUTPUT_DIR = TASK_OUTPUT_DIR + "/checkpoint" ## username task_name
+LOSS_OUTPUT_FILE = TASK_OUTPUT_DIR + "/loss/loss.txt" ## username task_name
 USER_DATA_ROOT = "~/usrdata/%s" ## username
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 DOWNLOAD_TIMER_REFRESH_SECONDS = 60
@@ -180,6 +181,17 @@ def get_download_path(username: str, task_name: str) -> str:
     return f"{message}" + "|" + checkpoint_dir
 
 
+def get_loss_download_path(username: str, task_name: str) -> str:
+    loss_path = LOSS_OUTPUT_FILE % (username, task_name)
+    if not os.path.isfile(loss_path):
+        message = f"{task_name}: loss download failed, loss file does not exist."
+        print(f"[loss不存在] {loss_path}")
+        return f"{message}" + "|" + ""
+    message = f"{task_name}: loss download task queued."
+    print(f"[损失下载入队] {message}")
+    return f"{message}" + "|" + loss_path
+
+
 def _tar_stream_size(path: str) -> int:
     tar_size = 0
     for root, _, filenames in os.walk(path):
@@ -307,18 +319,32 @@ def handle_request(text: str) -> dict[str, Any]:
     return {"message": message, "tasks": tasks}
 
 
-def handle_download_task(event: "TaskEvent") -> dict[str, str]:
+def _handle_loss_download(event: "TaskEvent", username: str, task_name: str) -> dict[str, str]:
+    response = get_loss_download_path(username, task_name)
+    message, _, loss_path = response.partition("|")
+    if not loss_path:
+        print(f"[损失下载失败] {message or 'loss file does not exist.'}")
+        return {"message": message or "loss file does not exist."}
+
+    print(f"[损失下载开始] {event.client_id}: {loss_path}")
+    sock = event.client.socket
+    old_timeout = sock.gettimeout()
+    event.refresh_client_expire_time()
     try:
-        request = json.loads(event.request_text)
-    except json.JSONDecodeError:
-        return {"message": "invalid json"}
+        sock.setblocking(True)
+        with sock.makefile("wb", buffering=DOWNLOAD_CHUNK_SIZE) as writer, tarfile.open(fileobj=writer, mode="w|") as tar:
+            tar.add(loss_path, arcname="loss.txt", recursive=False)
+        print(f"[损失下载完成] {event.client_id}: {loss_path}")
+        return {"message": message}
+    finally:
+        event.refresh_client_expire_time()
+        try:
+            sock.settimeout(old_timeout)
+        except OSError:
+            pass
 
-    username = str(request.get("username") or "").strip()
-    task_name = str(request.get("taskName") or "").strip()
-    if not username or not task_name:
-        print(f"[结果下载失败] invalid request: {event.request_text}")
-        return {"message": "invalid request"}
 
+def _handle_result_download(event: "TaskEvent", request: dict[str, Any], username: str, task_name: str) -> dict[str, str]:
     response = get_download_path(username, task_name)
     message, _, download_path = response.partition("|")
     if not download_path:
@@ -358,3 +384,23 @@ def handle_download_task(event: "TaskEvent") -> dict[str, str]:
             sock.settimeout(old_timeout)
         except OSError:
             pass
+
+
+def handle_download_task(event: "TaskEvent") -> dict[str, str]:
+    try:
+        request = json.loads(event.request_text)
+    except json.JSONDecodeError:
+        return {"message": "invalid json"}
+
+    username = str(request.get("username") or "").strip()
+    task_name = str(request.get("taskName") or "").strip()
+    if not username or not task_name:
+        print(f"[下载失败] invalid request: {event.request_text}")
+        return {"message": "invalid request"}
+
+    action = str(request.get("action") or "").strip()
+    if action == "结果下载":
+        return _handle_result_download(event, request, username, task_name)
+    if action == "下载损失":
+        return _handle_loss_download(event, username, task_name)
+    return {"message": "invalid download action"}

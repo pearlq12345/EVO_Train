@@ -35,12 +35,12 @@ def log(message: str) -> None:
 
 
 def is_download_task(request_text: str) -> bool:
-    """Return whether this request is a result-download task."""
+    """Return whether this request should run in the download task queue."""
     try:
         request = json.loads(request_text)
     except json.JSONDecodeError:
         return False
-    return str(request.get("action") or "").strip() == "结果下载"
+    return str(request.get("action") or "").strip() in {"结果下载", "下载损失"}
 
 
 @dataclass
