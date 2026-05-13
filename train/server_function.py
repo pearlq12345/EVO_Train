@@ -611,3 +611,8 @@ def handle_request(text: str) -> dict[str, Any]:
 def handle_request_text(text: str) -> str:
     """Handle one complete JSON request and return a JSON response string."""
     return json.dumps(handle_request(text), ensure_ascii=False)
+
+
+def handle_download_task(event: Any) -> dict[str, Any]:
+    """Handle download events from the dedicated download worker queue."""
+    return handle_request(event.request_text)

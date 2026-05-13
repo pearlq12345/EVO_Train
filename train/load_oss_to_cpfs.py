@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
-"""Load data from Alibaba Cloud OSS to a CPFS directory."""
+"""
+Author: Ru-hulu
+Date: 2026-05-03
+
+Load data from Alibaba Cloud OSS to a CPFS directory.
+"""
 # python3 scripts/load_oss_to_cpfs.py \
 #   --oss 'oss://evo-data/user_uploads/0e00c623-5730-495b-b958-069eff663555/c2f4e378-bf8e-48b9-9c36-a7aff9a0677c/libero_10_no_noops_1.0.0_lerobot/' \
 #   --cpfs /mnt/libero_10_no_noops_1.0.0_lerobot \
 #   --endpoint https://oss-cn-hangzhou-internal.aliyuncs.com \
 #   --jobs 32 \
 #   --update
-
+# user_uploads/0e00c623-5730-495b-b958-069eff663555/a42b1ce1-02ed-4023-b80b-fcfbbaf755dc/260407-szk-TestData
 # -oss: the directory of source data
 # -cpfs: the directory of destination
 # -endpoint: Designate network access entry for OSS. It can be find in .env
 # -job: the number of process to copy data
 # -update: If the target directory already contains a file with the same name and it is up-to-date, skip repeated downloading.
+
+# python3 load_oss_to_cpfs.py \
+#   --oss 'oss://evo-data/model_result/' \
+#   --cpfs /mnt/usrresult/ \
+#   --endpoint https://oss-cn-hangzhou-internal.aliyuncs.com \
+#   --jobs 32 \
+#   --update
+
 from __future__ import annotations
 import argparse
 import os
