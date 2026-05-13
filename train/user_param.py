@@ -36,6 +36,9 @@ class UserTrainCmd:
     def create_train_cmd(self, usrname: str, jobname: str) -> str:
         if self.empty_docker:
             return f"sleep {self.sleep_t}"
+        output_dir = self.OUTPUT_DIR % (usrname, jobname)
+        loss_output_dir = self.LOSS_OUTPUT_DIR % (usrname, jobname)
+        print(f"[训练损失日志路径] {loss_output_dir}")
         return (
             f"{self.COMMAND} "
             f"--dataset.repo_id={self.DATASET_REPO_ID} "
@@ -49,7 +52,7 @@ class UserTrainCmd:
             f"--batch_size={self.batch_size} "
             f"--log_freq={self.log_freq} "
             f"--policy.device={self.POLICY_DEVICE} "
-            f"--policy.pretrained_backbone_weights={self.POLICY_PRETRAINED_BACKBONE_WEIGHTS}"
-            f"--output_dir={self.OUTPUT_DIR % (usrname, jobname)} "
-            f"--loss_file_outputdir={self.LOSS_OUTPUT_DIR % (usrname, jobname)}"
+            f"--policy.pretrained_backbone_weights={self.POLICY_PRETRAINED_BACKBONE_WEIGHTS} "
+            f"--output_dir={output_dir} "
+            f"--loss_file_outputdir={loss_output_dir}"
         )
