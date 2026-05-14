@@ -404,6 +404,8 @@ Do not duplicate full docs in handoff. Link to the relevant artifact paths inste
 - Long training must include balance and runtime warnings.
 - Failure diagnosis must cite evidence from logs or task metadata.
 
+For AutoDL provider setup and smoke-test commands, see [AutoDL Provider Runbook](runbooks/autodl-provider.md).
+
 ## Recommended Initial Skill Set
 
 Start with these first:
