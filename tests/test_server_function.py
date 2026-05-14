@@ -982,6 +982,46 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["artifact"]["artifactPath"], "/root/autodl-tmp/evo_train/output")
         self.assertEqual(response["artifact"]["dataBase64"], "YWJj")
 
+    def test_loss_download_uses_provider_chunk_protocol(self) -> None:
+        sql_pack.sql_add_user_task(
+            "pearl",
+            "autodl-loss",
+            status="Succeeded",
+            provider="autodl",
+            remote_job_id="pro-1::runner-loss",
+            checkpoint_path="/root/autodl-tmp/evo_train/output",
+        )
+        platform = SimpleNamespace(
+            download_artifact_chunk=lambda job_id, artifact_path, offset, chunk_size: {
+                "artifactPath": artifact_path,
+                "archivePath": "/root/autodl-tmp/evo_train/jobs/evo_train_runner-loss/artifact.tar.gz",
+                "offset": offset,
+                "nextOffset": offset + chunk_size,
+                "chunkSize": chunk_size,
+                "totalBytes": 128,
+                "done": True,
+                "dataBase64": "bG9zcw==",
+            }
+        )
+
+        with patch.object(server_function, "get_platform", return_value=platform):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "taskName": "autodl-loss",
+                        "action": "下载损失",
+                        "offset": 0,
+                        "chunkSize": 4,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "download loss success")
+        self.assertEqual(response["artifact"]["artifactPath"], "/root/autodl-tmp/evo_train/output/loss/loss.txt")
+        self.assertEqual(response["artifact"]["dataBase64"], "bG9zcw==")
+
     def test_start_training_rejects_insufficient_balance(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 999)
 

@@ -55,6 +55,7 @@ USER_ACTIONS = {
     "结束训练",
     "删除任务",
     "结果下载",
+    "下载损失",
     "AI配置训练",
     "查询状态",
     "查询下载目录",
@@ -756,6 +757,26 @@ def _download_task_artifact(username: str, task_name: str, request: dict[str, An
     return response
 
 
+def _download_loss_artifact(username: str, task_name: str, request: dict[str, Any]) -> dict[str, Any]:
+    task = sql_get_user_task(username, task_name)
+    if task is None:
+        return _with_wallet(username, "download loss failed", sql_get_user_all_task(username))
+    loss_path = (
+        _request_optional_string(request, "lossPath")
+        or _request_optional_string(request, "artifactPath")
+        or _request_optional_string(request, "downloadPath")
+    )
+    if not loss_path and task.get("checkpointPath"):
+        loss_path = f"{task['checkpointPath'].rstrip('/')}/loss/loss.txt"
+    if not loss_path:
+        return _with_wallet(username, "download loss failed: missing lossPath", sql_get_user_all_task(username))
+    artifact_request = dict(request)
+    artifact_request["artifactPath"] = loss_path
+    response = _download_task_artifact(username, task_name, artifact_request)
+    response["message"] = response["message"].replace("download artifact", "download loss")
+    return response
+
+
 def _list_user_dataset_dirs(username: str) -> list[str]:
     """Return local dataset directory names in the shape used by upstream EVO-Train."""
     root_template = os.environ.get("EVO_TRAIN_USER_DATA_ROOT", "~/usrdata/{username}")
@@ -976,6 +997,8 @@ def handle_request(text: str) -> dict[str, Any]:
         message, tasks = _stop_task(username, task_name, request)
     elif action == "结果下载":
         return _download_task_artifact(username, task_name, request)
+    elif action == "下载损失":
+        return _download_loss_artifact(username, task_name, request)
     elif action == "查询状态":
         return _status_response(username, task_name, request)
     elif action == "查询下载目录":
