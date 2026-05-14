@@ -239,6 +239,141 @@ Understand intent
 
 Do not skip confirmation before starting paid compute.
 
+## Feedback Loops
+
+Every skill must create a fast pass/fail signal before it claims confidence. For RoboClaw, feedback loops are training-specific:
+
+| Loop | When to use | Good signal |
+| --- | --- | --- |
+| Plan validation | Before paid compute | missing fields, selected `skuId`, selected `imageId`, estimated first-hour cost |
+| Backend dry path | Before provider launch | request materializes without raw command or missing provider fields |
+| Smoke Test | Before full training | task starts, logs stream, loss path exists, artifact path exists |
+| Status loop | During training | `查询状态` changes predictably and billing remains valid |
+| Artifact loop | After training | `结果下载` and `下载损失` return expected chunks |
+| Diagnosis loop | After failure | one failure class is supported by logs or task metadata |
+
+Treat the feedback loop itself as part of the product. A vague "task failed" response is not enough; the skill should sharpen the signal until it can say which layer failed.
+
+## Diagnosis Discipline
+
+Failure diagnosis should follow a fixed order:
+
+1. Build or identify a feedback loop.
+2. Reproduce the failure or collect the exact failed artifact.
+3. Produce 3-5 ranked hypotheses.
+4. Test one hypothesis at a time with targeted evidence.
+5. Recommend a fix and a regression guard.
+6. Clean up temporary instrumentation.
+
+RoboClaw diagnosis should prefer evidence in this order:
+
+1. provider status and instance lifecycle metadata;
+2. task `error` field;
+3. `run.log`;
+4. `loss.txt`;
+5. `eval_info.json`;
+6. wallet and billing records;
+7. workflow params and selected GPU/Image.
+
+Do not say "probably CUDA" or "probably data issue" unless the evidence points there. If the evidence is missing, the recommendation should be "collect better evidence" and name the missing artifact.
+
+## Vertical Slices
+
+Build RoboClaw AI capability in vertical slices, not horizontal layers.
+
+Bad:
+
+```text
+first build all skill prompts
+then all UI
+then all backend APIs
+then tests
+```
+
+Good:
+
+```text
+one skill intent
+  -> one query path
+  -> one materialized request
+  -> one smoke test
+  -> one diagnosis path
+```
+
+Example vertical slices:
+
+1. `environment-selection`: `GPU规格查询` + `AutoDL镜像查询` + recommendation + confirmation.
+2. `custom-project-smoke`: repo URL + image + GPU SKU + one short training command + artifact check.
+3. `loss-diagnosis`: failed task + `下载损失` + last log + classified failure.
+4. `metaworld-smoke`: env name + 5 epochs + 2 eval episodes + result summary.
+
+Each slice should be demoable without waiting for the entire training platform to be complete.
+
+## Architecture Language
+
+Use these architecture terms consistently when improving RoboClaw:
+
+| Term | Meaning for RoboClaw |
+| --- | --- |
+| Module | Anything with an interface and implementation, from `AutoDLPlatform` to a training skill. |
+| Interface | Everything callers must know: fields, order, errors, config, billing behavior, and performance expectations. |
+| Seam | The place where behavior can vary without callers changing. Provider runtime and workflow registry are seams. |
+| Adapter | A concrete implementation at a seam, such as AutoDL or Aliyun DLC. |
+| Depth | How much useful behavior sits behind a small interface. |
+| Locality | Whether changes and bugs are concentrated in one place. |
+
+Use the deletion test before adding new abstractions:
+
+```text
+If this module is deleted, does complexity disappear, or does it reappear across many callers?
+```
+
+If complexity reappears across many callers, the module is earning its keep. If it disappears, the module was likely a pass-through.
+
+## Deep Module Targets
+
+RoboClaw should deliberately deepen these modules:
+
+| Module | Desired interface | Complexity hidden behind it |
+| --- | --- | --- |
+| Training Skill | intent in, Training Plan out | questions, defaults, warnings, validation |
+| Workflow | params in, staged command out | benchmark-specific command assembly |
+| Provider | submit/query/stop/download | AutoDL/PAI API details, SSH, artifact packaging |
+| Billing | freeze/charge/refund/settle | wallet invariants and hourly accounting |
+| Diagnosis | task evidence in, fix recommendation out | log parsing, failure classification, retry advice |
+
+This keeps AI prompts, UI, provider APIs, and billing from leaking into one another.
+
+## ADR and Context Rules
+
+Create or update `CONTEXT.md` when a term becomes canonical, especially for:
+
+- task vs Training Task;
+- GPU vs GPU SKU;
+- image vs provider image ID;
+- cost price vs sale price;
+- smoke test vs full run.
+
+Create an ADR only when all are true:
+
+- the decision is hard to reverse;
+- future contributors would wonder why it was chosen;
+- real alternatives existed.
+
+Do not use ADRs for temporary implementation notes.
+
+## Handoff Rule
+
+Every long-running RoboClaw AI session should leave a concise handoff when context is about to shift:
+
+- current branch and PR;
+- latest validation commands;
+- what was decided in `CONTEXT.md` or ADRs;
+- which skill should continue next;
+- what evidence is still missing.
+
+Do not duplicate full docs in handoff. Link to the relevant artifact paths instead.
+
 ## Backend Action Mapping
 
 | AI skill need | TCP action |
@@ -283,4 +418,3 @@ Start with these first:
 8. `artifact-review`
 
 These map cleanly to the provider runtime and billing architecture already present in the current branch.
-
