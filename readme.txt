@@ -4,6 +4,12 @@ start：
       # python3 server_tcp/server_connection.py --billing-scan-interval 60
       # 如需本地调试关闭：
       # python3 server_tcp/server_connection.py --disable-billing-scheduler
+
+architecture docs：
+      docs/top-level-architecture.md
+      docs/roboclaw-ai-skills.md
+      docs/runbooks/autodl-provider.md
+
 structure：
                               ┌────────────────────┐
                                       Client
