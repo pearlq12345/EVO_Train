@@ -646,6 +646,29 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["skus"][0]["serviceFeeRate"], "0.10")
         self.assertTrue(response["skus"][0]["readyToStart"])
 
+    def test_autodl_image_query_returns_ready_images(self) -> None:
+        images = json.dumps(
+            [
+                {
+                    "imageId": "pytorch-cu121",
+                    "displayName": "PyTorch CUDA 12.1",
+                    "autodlImageUuid": "image-cu121",
+                    "cudaVFrom": 121,
+                }
+            ]
+        )
+
+        with patch.dict("os.environ", {"AUTODL_IMAGES_JSON": images}, clear=True):
+            response = server_function.handle_request(
+                json.dumps({"action": "AutoDL镜像查询"}, ensure_ascii=False)
+            )
+
+        self.assertEqual(response["message"], "autodl image query success")
+        self.assertEqual(response["images"][0]["imageId"], "pytorch-cu121")
+        self.assertEqual(response["images"][0]["autodlImageUuid"], "image-cu121")
+        self.assertEqual(response["images"][0]["cudaVFrom"], "121")
+        self.assertTrue(response["images"][0]["readyToStart"])
+
     def test_gpu_sku_query_hides_incomplete_default_skus(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             response = server_function.handle_request(
@@ -715,6 +738,63 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(captured["gpu_count"], 1)
         self.assertEqual(response["tasks"][0]["hourlyPriceCents"], "992")
 
+    def test_autodl_start_training_combines_gpu_sku_and_image_id(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        skus = json.dumps(
+            [
+                {
+                    "skuId": "sku-4090",
+                    "provider": "autodl",
+                    "displayName": "RTX 4090 48G",
+                    "gpuSpec": "4090-48g",
+                    "autodlGpuSpecUuid": "v-48g",
+                    "gpuCount": 1,
+                    "costHourlyCents": 901,
+                }
+            ]
+        )
+        images = json.dumps(
+            [
+                {
+                    "imageId": "pytorch-cu121",
+                    "displayName": "PyTorch CUDA 12.1",
+                    "autodlImageUuid": "image-cu121",
+                    "cudaVFrom": 121,
+                }
+            ]
+        )
+        captured: dict[str, object] = {}
+
+        class FakePlatform:
+            def submit(self, job_config: dict[str, object]) -> str:
+                captured.update(job_config)
+                return "pro-1::runner-1"
+
+        request = {
+            "username": "pearl",
+            "taskName": "autodl-sku-image",
+            "action": "开始训练",
+            "provider": "autodl",
+            "skuId": "sku-4090",
+            "imageId": "pytorch-cu121",
+            "workflow": "custom_project",
+            "params": {
+                "repoUrl": "https://example.com/repo.git",
+                "trainCommand": "python train.py",
+            },
+        }
+
+        with (
+            patch.dict("os.environ", {"AUTODL_GPU_SKUS_JSON": skus, "AUTODL_IMAGES_JSON": images}, clear=False),
+            patch.object(server_function, "get_platform", return_value=FakePlatform()),
+        ):
+            response = server_function.handle_request(json.dumps(request, ensure_ascii=False))
+
+        self.assertEqual(response["message"], "create task success")
+        self.assertEqual(captured["autodl_gpu_spec_uuid"], "v-48g")
+        self.assertEqual(captured["autodl_image_uuid"], "image-cu121")
+        self.assertEqual(captured["autodl_cuda_v_from"], 121)
+
     def test_autodl_start_training_rejects_incomplete_sku_before_billing(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 2000)
         skus = json.dumps(
@@ -745,7 +825,7 @@ class ServerFunctionTests(unittest.TestCase):
         with patch.dict("os.environ", {"AUTODL_GPU_SKUS_JSON": skus}, clear=False):
             response = server_function.handle_request(json.dumps(request, ensure_ascii=False))
 
-        self.assertIn("AutoDL sku is missing required fields", response["message"])
+        self.assertIn("missing required field: imageId", response["message"])
         wallet = sql_pack.sql_get_wallet("pearl")
         self.assertEqual(wallet["balanceCents"], "2000")
         self.assertEqual(wallet["frozenCents"], "0")

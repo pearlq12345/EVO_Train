@@ -60,6 +60,7 @@ USER_ACTIONS = {
     "查询下载目录",
     "请求用户日志",
     "GPU规格查询",
+    "AutoDL镜像查询",
 }
 
 
@@ -233,22 +234,46 @@ def _load_autodl_skus() -> list[dict[str, Any]]:
     else:
         skus = [dict(item) for item in DEFAULT_AUTODL_SKUS]
 
-    default_image_uuid = os.environ.get("AUTODL_IMAGE_UUID", "")
-    default_cuda_v_from = os.environ.get("AUTODL_CUDA_V_FROM", "")
     default_data_centers = os.environ.get("AUTODL_DATA_CENTER_LIST", "")
     for sku in skus:
         sku.setdefault("provider", "autodl")
         sku.setdefault("enabled", True)
-        if default_image_uuid and not sku.get("autodlImageUuid"):
-            sku["autodlImageUuid"] = default_image_uuid
-        if default_cuda_v_from and not sku.get("cudaVFrom"):
-            sku["cudaVFrom"] = int(default_cuda_v_from)
         if default_data_centers and not sku.get("autodlDataCenters"):
             sku["autodlDataCenters"] = default_data_centers
         cost = int(sku.get("costHourlyCents") or 0)
         if cost > 0 and not sku.get("hourlyPriceCents"):
             sku["hourlyPriceCents"] = _sale_price_from_cost(cost)
     return skus
+
+
+def _load_autodl_images() -> list[dict[str, Any]]:
+    raw = os.environ.get("AUTODL_IMAGES_JSON")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid AUTODL_IMAGES_JSON: {exc}") from exc
+        if not isinstance(parsed, list):
+            raise ValueError("AUTODL_IMAGES_JSON must be a JSON array")
+        images = [dict(item) for item in parsed if isinstance(item, dict)]
+    else:
+        images = []
+        default_image_uuid = os.environ.get("AUTODL_IMAGE_UUID", "")
+        default_cuda_v_from = os.environ.get("AUTODL_CUDA_V_FROM", "")
+        if default_image_uuid and default_cuda_v_from:
+            images.append(
+                {
+                    "imageId": "default",
+                    "displayName": os.environ.get("AUTODL_IMAGE_NAME", "Default AutoDL image"),
+                    "autodlImageUuid": default_image_uuid,
+                    "cudaVFrom": int(default_cuda_v_from),
+                    "enabled": True,
+                }
+            )
+
+    for image in images:
+        image.setdefault("enabled", True)
+    return images
 
 
 def _public_sku(sku: dict[str, Any]) -> dict[str, str | bool]:
@@ -274,8 +299,7 @@ def _public_sku(sku: dict[str, Any]) -> dict[str, str | bool]:
 def _sku_ready_to_start(sku: dict[str, Any]) -> bool:
     if not bool(sku.get("enabled", True)):
         return False
-    required = ("autodlGpuSpecUuid", "autodlImageUuid", "cudaVFrom")
-    if any(sku.get(field) in (None, "") for field in required):
+    if sku.get("autodlGpuSpecUuid") in (None, ""):
         return False
     cost = int(sku.get("costHourlyCents") or 0)
     sale = int(sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or 0)
@@ -299,6 +323,38 @@ def _gpu_sku_response(request: dict[str, Any]) -> dict[str, Any]:
     return {"message": "gpu sku query success", "provider": provider, "skus": skus}
 
 
+def _public_image(image: dict[str, Any]) -> dict[str, str | bool]:
+    return {
+        "imageId": str(image.get("imageId") or ""),
+        "displayName": str(image.get("displayName") or image.get("imageId") or ""),
+        "autodlImageUuid": str(image.get("autodlImageUuid") or ""),
+        "cudaVFrom": str(image.get("cudaVFrom") or ""),
+        "enabled": bool(image.get("enabled", True)),
+        "readyToStart": _image_ready_to_start(image),
+    }
+
+
+def _image_ready_to_start(image: dict[str, Any]) -> bool:
+    if not bool(image.get("enabled", True)):
+        return False
+    return bool(image.get("autodlImageUuid")) and image.get("cudaVFrom") not in (None, "")
+
+
+def _autodl_image_response(request: dict[str, Any]) -> dict[str, Any]:
+    include_disabled = _request_bool(request, "includeDisabled")
+    include_incomplete = _request_bool(request, "includeIncomplete")
+    try:
+        images = [
+            _public_image(image)
+            for image in _load_autodl_images()
+            if (include_disabled or bool(image.get("enabled", True)))
+            and (include_incomplete or _image_ready_to_start(image))
+        ]
+    except ValueError as exc:
+        return {"message": f"autodl image query failed: {exc}", "images": []}
+    return {"message": "autodl image query success", "images": images}
+
+
 def _find_autodl_sku(request: dict[str, Any]) -> dict[str, Any] | None:
     sku_id = _request_optional_string(request, "skuId")
     gpu_spec = _request_optional_string(request, "gpuSpec")
@@ -314,6 +370,18 @@ def _find_autodl_sku(request: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _find_autodl_image(request: dict[str, Any]) -> dict[str, Any] | None:
+    image_id = _request_optional_string(request, "imageId")
+    if not image_id:
+        return None
+    for image in _load_autodl_images():
+        if not bool(image.get("enabled", True)):
+            continue
+        if str(image.get("imageId") or "") == image_id:
+            return image
+    return None
+
+
 def _apply_autodl_sku(request: dict[str, Any]) -> dict[str, Any]:
     if normalize_provider(_request_optional_string(request, "provider") or "aliyun") != "autodl":
         return request
@@ -321,16 +389,35 @@ def _apply_autodl_sku(request: dict[str, Any]) -> dict[str, Any]:
     if sku is None:
         if _request_optional_string(request, "skuId"):
             raise ValueError(f"unknown or disabled AutoDL skuId: {_request_string(request, 'skuId')}")
+        if _request_optional_string(request, "imageId"):
+            return _apply_autodl_image(request)
         return request
     enriched = dict(request)
     enriched["gpuSpec"] = sku.get("gpuSpec") or enriched.get("gpuSpec")
     enriched["gpuCount"] = sku.get("gpuCount") or enriched.get("gpuCount") or 1
     enriched["autodlGpuSpecUuid"] = sku.get("autodlGpuSpecUuid") or enriched.get("autodlGpuSpecUuid")
-    enriched["autodlImageUuid"] = sku.get("autodlImageUuid") or enriched.get("autodlImageUuid")
     enriched["autodlDataCenters"] = sku.get("autodlDataCenters") or enriched.get("autodlDataCenters")
-    enriched["cudaVFrom"] = sku.get("cudaVFrom") or enriched.get("cudaVFrom")
+    enriched["autodlImageUuid"] = enriched.get("autodlImageUuid") or sku.get("autodlImageUuid")
+    enriched["cudaVFrom"] = enriched.get("cudaVFrom") or sku.get("cudaVFrom")
     cost = int(sku.get("costHourlyCents") or 0)
     enriched["hourlyPriceCents"] = sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or enriched.get("hourlyPriceCents")
+    if sku.get("requiresImage") is not False and not enriched.get("imageId") and not enriched.get("autodlImageUuid"):
+        raise ValueError("missing required field: imageId")
+    return _apply_autodl_image(enriched)
+
+
+def _apply_autodl_image(request: dict[str, Any]) -> dict[str, Any]:
+    if normalize_provider(_request_optional_string(request, "provider") or "aliyun") != "autodl":
+        return request
+    image = _find_autodl_image(request)
+    if image is None:
+        if _request_optional_string(request, "imageId"):
+            raise ValueError(f"unknown or disabled AutoDL imageId: {_request_string(request, 'imageId')}")
+        enriched = dict(request)
+    else:
+        enriched = dict(request)
+        enriched["autodlImageUuid"] = image.get("autodlImageUuid") or enriched.get("autodlImageUuid")
+        enriched["cudaVFrom"] = image.get("cudaVFrom") or enriched.get("cudaVFrom")
     missing = [
         field
         for field in ("autodlGpuSpecUuid", "autodlImageUuid", "cudaVFrom")
@@ -860,6 +947,8 @@ def handle_request(text: str) -> dict[str, Any]:
         return _platform_balance_response(request)
     if action == "GPU规格查询":
         return _gpu_sku_response(request)
+    if action == "AutoDL镜像查询":
+        return _autodl_image_response(request)
 
     if action in {"余额查询", "账单查询", "管理员充值"} and not username:
         return {"message": "invalid request", "tasks": []}
