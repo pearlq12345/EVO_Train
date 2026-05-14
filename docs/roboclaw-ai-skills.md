@@ -408,13 +408,13 @@ Do not duplicate full docs in handoff. Link to the relevant artifact paths inste
 
 Start with these first:
 
-1. `training-intake`
-2. `environment-selection`
+1. [`training-intake`](skills/training-intake.md)
+2. [`environment-selection`](skills/environment-selection.md)
 3. `custom-project-training`
 4. `evf-metaworld-training`
 5. `evf-libero-training`
-6. `runtime-monitor`
-7. `failure-diagnosis`
+6. [`runtime-monitor`](skills/runtime-monitor.md)
+7. [`failure-diagnosis`](skills/failure-diagnosis.md)
 8. `artifact-review`
 
 These map cleanly to the provider runtime and billing architecture already present in the current branch.
