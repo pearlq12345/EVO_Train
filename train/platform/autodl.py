@@ -264,11 +264,13 @@ class AutoDLPlatform(TrainPlatform):
         client = self._connect(instance_uuid)
         try:
             _, stdout, stderr = client.exec_command(command)
+            out = stdout.read().decode("utf-8", errors="replace").strip()
+            err = stderr.read().decode("utf-8", errors="replace").strip()
             exit_status = stdout.channel.recv_exit_status()
             return (
                 exit_status,
-                stdout.read().decode("utf-8", errors="replace").strip(),
-                stderr.read().decode("utf-8", errors="replace").strip(),
+                out,
+                err,
             )
         finally:
             client.close()
@@ -297,6 +299,7 @@ class AutoDLPlatform(TrainPlatform):
         )
         launch_script = "; ".join(remote_parts)
         return (
+            f"mkdir -p {shlex.quote(job_dir)}; "
             f"nohup bash -lc {shlex.quote(launch_script)} "
             f">{shlex.quote(log_file)} 2>&1 < /dev/null & "
             f"echo {shlex.quote(job_id)}"

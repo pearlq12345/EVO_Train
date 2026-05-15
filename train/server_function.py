@@ -34,7 +34,7 @@ from sql_lite.sql_pack import (
 from train import start_train
 from train.platform.autodl import AutoDLApiClient
 from train.platform.factory import get_platform, normalize_provider
-from train.workflows import build_training_plan, materialize_training_request
+from train.workflows import build_training_plan, enrich_params_from_message, materialize_training_request, parse_params
 
 
 TERMINAL_STATUSES = start_train.DONE_STATUSES | start_train.FAILED_STATUSES | {"STOPPED"}
@@ -62,6 +62,8 @@ USER_ACTIONS = {
     "请求用户日志",
     "GPU规格查询",
     "AutoDL镜像查询",
+    "训练运行时匹配",
+    "运行时匹配",
 }
 
 
@@ -277,11 +279,11 @@ def _load_autodl_images() -> list[dict[str, Any]]:
     return images
 
 
-def _public_sku(sku: dict[str, Any]) -> dict[str, str | bool]:
+def _public_sku(sku: dict[str, Any]) -> dict[str, Any]:
     cost = int(sku.get("costHourlyCents") or 0)
     sale = int(sku.get("hourlyPriceCents") or _sale_price_from_cost(cost) or 0)
     ready_to_start = _sku_ready_to_start(sku)
-    response: dict[str, str | bool] = {
+    response: dict[str, Any] = {
         "skuId": str(sku.get("skuId") or ""),
         "provider": str(sku.get("provider") or "autodl"),
         "displayName": str(sku.get("displayName") or sku.get("gpuSpec") or sku.get("skuId") or ""),
@@ -292,6 +294,26 @@ def _public_sku(sku: dict[str, Any]) -> dict[str, str | bool]:
         "enabled": bool(sku.get("enabled", True)),
         "readyToStart": ready_to_start,
     }
+    for source, target in (
+        ("gpuMemoryGb", "gpuMemoryGb"),
+        ("diskGb", "diskGb"),
+        ("region", "region"),
+    ):
+        if sku.get(source) not in (None, ""):
+            response[target] = str(sku.get(source))
+    for key in (
+        "supportedBackends",
+        "supportedModels",
+        "supportedBenchmarks",
+        "supportedAlgorithms",
+        "supportedTrainingModes",
+        "capabilities",
+        "simFrameworks",
+        "datasetFormats",
+        "gpuFamilies",
+    ):
+        if key in sku:
+            response[key] = _string_list(sku.get(key))
     if cost > 0:
         response["costHourlyCents"] = str(cost)
     return response
@@ -324,8 +346,8 @@ def _gpu_sku_response(request: dict[str, Any]) -> dict[str, Any]:
     return {"message": "gpu sku query success", "provider": provider, "skus": skus}
 
 
-def _public_image(image: dict[str, Any]) -> dict[str, str | bool]:
-    return {
+def _public_image(image: dict[str, Any]) -> dict[str, Any]:
+    response: dict[str, Any] = {
         "imageId": str(image.get("imageId") or ""),
         "displayName": str(image.get("displayName") or image.get("imageId") or ""),
         "autodlImageUuid": str(image.get("autodlImageUuid") or ""),
@@ -333,6 +355,31 @@ def _public_image(image: dict[str, Any]) -> dict[str, str | bool]:
         "enabled": bool(image.get("enabled", True)),
         "readyToStart": _image_ready_to_start(image),
     }
+    for source, target in (
+        ("python", "python"),
+        ("torch", "torch"),
+        ("minDiskGb", "minDiskGb"),
+        ("healthcheck", "healthcheck"),
+        ("setupProfile", "setupProfile"),
+        ("status", "status"),
+    ):
+        if image.get(source) not in (None, ""):
+            response[target] = str(image.get(source))
+    for key in (
+        "supportedBackends",
+        "supportedModels",
+        "supportedBenchmarks",
+        "supportedAlgorithms",
+        "supportedTrainingModes",
+        "capabilities",
+        "simFrameworks",
+        "datasetFormats",
+        "gpuFamilies",
+        "frameworks",
+    ):
+        if key in image:
+            response[key] = _string_list(image.get(key))
+    return response
 
 
 def _image_ready_to_start(image: dict[str, Any]) -> bool:
@@ -354,6 +401,183 @@ def _autodl_image_response(request: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         return {"message": f"autodl image query failed: {exc}", "images": []}
     return {"message": "autodl image query success", "images": images}
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    return [item.strip().lower() for item in str(value).split(",") if item.strip()]
+
+
+def _requirement_value(request: dict[str, Any], key: str) -> str:
+    params = request.get("params")
+    if isinstance(params, dict) and params.get(key) not in (None, ""):
+        return str(params.get(key) or "").strip().lower()
+    return _request_string(request, key).lower()
+
+
+def _requirement_int(request: dict[str, Any], key: str) -> int:
+    params = request.get("params")
+    value: Any = None
+    if isinstance(params, dict):
+        value = params.get(key)
+    if value in (None, ""):
+        value = request.get(key)
+    if value in (None, ""):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid integer field: {key}") from exc
+
+
+def _requirement_list(request: dict[str, Any], key: str) -> list[str]:
+    params = request.get("params")
+    if isinstance(params, dict) and params.get(key) not in (None, ""):
+        return _string_list(params.get(key))
+    return _string_list(request.get(key))
+
+
+def _supports(value: str, supported: list[str]) -> bool:
+    return not value or not supported or value in supported
+
+
+def _runtime_match_response(request: dict[str, Any]) -> dict[str, Any]:
+    provider = normalize_provider(_request_optional_string(request, "provider") or "autodl")
+    if provider != "autodl":
+        return {"message": "runtime match failed: unsupported provider", "provider": provider, "matches": []}
+    req = {
+        "backendKind": _requirement_value(request, "backendKind") or _requirement_value(request, "backend"),
+        "modelFamily": _requirement_value(request, "modelFamily"),
+        "benchmark": _requirement_value(request, "benchmark") or _requirement_value(request, "envType"),
+        "algorithm": _requirement_value(request, "algorithm"),
+        "trainingMode": _requirement_value(request, "trainingMode"),
+        "minGpuMemoryGb": _requirement_int(request, "minGpuMemoryGb"),
+        "minDiskGb": _requirement_int(request, "minDiskGb"),
+        "requiredCapabilities": _requirement_list(request, "requiredCapabilities"),
+    }
+    requested_sku_id = _request_optional_string(request, "skuId")
+    requested_image_id = _request_optional_string(request, "imageId")
+    try:
+        skus = [
+            _public_sku(sku)
+            for sku in _load_autodl_skus()
+            if bool(sku.get("enabled", True))
+            and (not requested_sku_id or str(sku.get("skuId") or "") == requested_sku_id)
+        ]
+        images = [
+            _public_image(image)
+            for image in _load_autodl_images()
+            if bool(image.get("enabled", True))
+            and (not requested_image_id or str(image.get("imageId") or "") == requested_image_id)
+        ]
+    except ValueError as exc:
+        return {"message": f"runtime match failed: {exc}", "provider": provider, "requirements": req, "matches": []}
+    matches = []
+    for sku in skus:
+        for image in images:
+            result = _score_runtime_candidate(req, sku, image)
+            matches.append(result)
+    matches.sort(key=lambda item: (item["compatible"], item["score"]), reverse=True)
+    return {
+        "message": "runtime match success",
+        "provider": provider,
+        "requirements": req,
+        "matches": matches,
+        "readyToStart": any(item["compatible"] for item in matches),
+    }
+
+
+def _score_runtime_candidate(req: dict[str, Any], sku: dict[str, Any], image: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    blocking: list[str] = []
+    risks: list[str] = []
+    score = 100
+
+    if not sku.get("readyToStart"):
+        blocking.append("sku is incomplete or disabled")
+        score -= 40
+    if not image.get("readyToStart"):
+        blocking.append("image is incomplete or disabled")
+        score -= 40
+    for field, label, sku_key, image_key in (
+        ("backendKind", "backend", "supportedBackends", "supportedBackends"),
+        ("modelFamily", "model", "supportedModels", "supportedModels"),
+        ("benchmark", "benchmark", "supportedBenchmarks", "supportedBenchmarks"),
+        ("algorithm", "algorithm", "supportedAlgorithms", "supportedAlgorithms"),
+        ("trainingMode", "training mode", "supportedTrainingModes", "supportedTrainingModes"),
+    ):
+        value = str(req.get(field) or "")
+        sku_supported = _string_list(sku.get(sku_key))
+        image_supported = _string_list(image.get(image_key))
+        if not _supports(value, sku_supported):
+            blocking.append(f"sku does not support {label}: {value}")
+            score -= 20
+        elif value:
+            reasons.append(f"sku supports {label}: {value}")
+        if not _supports(value, image_supported):
+            blocking.append(f"image does not support {label}: {value}")
+            score -= 20
+        elif value:
+            reasons.append(f"image supports {label}: {value}")
+    min_gpu = int(req.get("minGpuMemoryGb") or 0)
+    gpu_memory = int(str(sku.get("gpuMemoryGb") or "0") or 0)
+    if min_gpu > 0 and gpu_memory > 0 and gpu_memory < min_gpu:
+        blocking.append(f"gpu memory too small: {gpu_memory}GB < {min_gpu}GB")
+        score -= 25
+    elif min_gpu > 0 and gpu_memory > 0:
+        reasons.append(f"gpu memory ok: {gpu_memory}GB")
+    elif min_gpu > 0:
+        risks.append("gpu memory is not declared for sku")
+        score -= 5
+    min_disk = int(req.get("minDiskGb") or 0)
+    image_disk = int(str(image.get("minDiskGb") or "0") or 0)
+    if min_disk > 0 and image_disk > 0 and image_disk > min_disk:
+        risks.append(f"image recommends at least {image_disk}GB disk")
+        score -= 5
+    required_capabilities = [str(item) for item in req.get("requiredCapabilities") or [] if str(item)]
+    if required_capabilities:
+        sku_capabilities = _candidate_capabilities(sku)
+        image_capabilities = _candidate_capabilities(image)
+        runtime_capabilities = sku_capabilities | image_capabilities
+        missing = [item for item in required_capabilities if item not in runtime_capabilities]
+        if missing:
+            blocking.append(f"missing capabilities: {', '.join(missing)}")
+            score -= min(40, 10 * len(missing))
+        else:
+            reasons.append(f"capabilities ok: {', '.join(required_capabilities)}")
+    if not reasons:
+        reasons.append("candidate has no declared incompatibility")
+    return {
+        "sku": sku,
+        "image": image,
+        "compatible": not blocking,
+        "score": max(0, min(100, score)),
+        "reasons": reasons,
+        "blockingReasons": blocking,
+        "risks": risks,
+    }
+
+
+def _candidate_capabilities(candidate: dict[str, Any]) -> set[str]:
+    keys = (
+        "capabilities",
+        "frameworks",
+        "simFrameworks",
+        "datasetFormats",
+        "supportedBackends",
+        "supportedModels",
+        "supportedBenchmarks",
+        "supportedAlgorithms",
+        "supportedTrainingModes",
+        "gpuFamilies",
+    )
+    values: set[str] = set()
+    for key in keys:
+        values.update(_string_list(candidate.get(key)))
+    return values
 
 
 def _find_autodl_sku(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -526,6 +750,7 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
             sql_get_user_all_task(username),
         )
     try:
+        request = _enrich_workflow_params(request)
         request = materialize_training_request(request)
         request = _apply_autodl_sku(request)
     except (ValueError, TypeError) as exc:
@@ -922,6 +1147,7 @@ def _platform_balance_response(request: dict[str, Any]) -> dict[str, Any]:
 
 def _ai_training_plan_response(username: str, request: dict[str, Any]) -> dict[str, Any]:
     try:
+        request = _enrich_workflow_params(request)
         plan = build_training_plan(request)
     except (ValueError, TypeError) as exc:
         return {
@@ -936,6 +1162,14 @@ def _ai_training_plan_response(username: str, request: dict[str, Any]) -> dict[s
         "plan": plan.to_response(),
         "tasks": sql_get_user_all_task(username),
     }
+
+
+def _enrich_workflow_params(request: dict[str, Any]) -> dict[str, Any]:
+    if not request.get("workflow") and not request.get("message") and not request.get("prompt"):
+        return request
+    enriched = dict(request)
+    enriched["params"] = enrich_params_from_message(request, parse_params(request.get("params")))
+    return enriched
 
 
 def _with_wallet(username: str, message: str, tasks: list[dict[str, str]]) -> dict[str, Any]:
@@ -970,6 +1204,8 @@ def handle_request(text: str) -> dict[str, Any]:
         return _gpu_sku_response(request)
     if action == "AutoDL镜像查询":
         return _autodl_image_response(request)
+    if action in {"训练运行时匹配", "运行时匹配"}:
+        return _runtime_match_response(request)
 
     if action in {"余额查询", "账单查询", "管理员充值"} and not username:
         return {"message": "invalid request", "tasks": []}

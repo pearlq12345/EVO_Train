@@ -466,6 +466,685 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertIn("--task-id 2", submitted_configs[0]["command"])
         self.assertTrue(submitted_configs[0]["autodl_managed"])
 
+    def test_rlinf_vla_plan_materializes_real_remote_command(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "algorithm": "grpo",
+                        "modelFamily": "pi0",
+                        "benchmark": "libero",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "maxSteps": 1000,
+                        "evalEpisodes": 2,
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["workflow"], "rlinf_vla")
+        self.assertEqual(plan["missingFields"], [])
+        self.assertEqual(
+            [stage["name"] for stage in plan["stages"]],
+            ["prepare_code", "setup_env", "preflight", "write_contract", "train_rlinf_vla", "collect_artifacts"],
+        )
+        self.assertIn("git clone", plan["stages"][0]["command"])
+        self.assertIn("test -f examples/embodiment/train_embodied_agent.py", plan["stages"][2]["command"])
+        self.assertIn("run_contract.json", plan["stages"][3]["command"])
+        self.assertIn("python examples/embodiment/train_embodied_agent.py", plan["stages"][4]["command"])
+        self.assertIn("--config-name libero_pi0_grpo_smoke", plan["stages"][4]["command"])
+        self.assertIn("runner.max_steps=1000", plan["stages"][4]["command"])
+        self.assertIn("actor.model.model_type=pi0", plan["stages"][4]["command"])
+
+    def test_start_training_materializes_rlinf_vla_for_autodl(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 3000)
+        submitted_configs: list[dict[str, object]] = []
+
+        def submit(job_config: dict[str, object]) -> str:
+            submitted_configs.append(job_config)
+            return "instance-1::rlinf-job-1"
+
+        platform = SimpleNamespace(submit=submit)
+
+        with patch.object(server_function, "get_platform", return_value=platform):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "taskName": "rlinf-vla-smoke",
+                        "action": "开始训练",
+                        "provider": "autodl",
+                        "workflow": "rlinf_vla",
+                        "params": {
+                            "repoUrl": "https://github.com/RLinf/RLinf.git",
+                            "configName": "libero_pi0_grpo_smoke",
+                            "datasetPath": "/root/autodl-tmp/datasets/libero",
+                            "artifactPath": "/root/autodl-tmp/evo_train/jobs/rlinf-vla-smoke/artifacts",
+                            "maxSteps": 1000,
+                            "evalEpisodes": 2,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "create task success")
+        self.assertEqual(response["tasks"][0]["provider"], "autodl")
+        self.assertEqual(response["tasks"][0]["datasetPath"], "/root/autodl-tmp/datasets/libero")
+        self.assertEqual(
+            response["tasks"][0]["checkpointPath"],
+            "/root/autodl-tmp/evo_train/jobs/rlinf-vla-smoke/artifacts",
+        )
+        self.assertIn("__EVO_STAGE_START__", submitted_configs[0]["command"])
+        self.assertIn("train_rlinf_vla", submitted_configs[0]["command"])
+        self.assertIn("libero_pi0_grpo_smoke", submitted_configs[0]["command"])
+        self.assertTrue(submitted_configs[0]["autodl_managed"])
+
+    def test_rlinf_vla_project_backend_matches_dexbotic_style_interface(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "launchMode": "project_backend",
+                        "repoUrl": "https://github.com/dexmal/dexbotic.git",
+                        "workdir": "/root/autodl-tmp/dexbotic",
+                        "configName": "libero_goal_ppo_dexbotic_pi0",
+                        "launcherModule": "dexbotic.rl.model_rl_libero_pi0",
+                        "rlinfExtModule": "dexbotic.rl.rlinf_registry",
+                        "suite": "libero_goal",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "artifactPath": "/root/autodl-tmp/evo_train/jobs/dexbotic-rl/artifacts",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["missingFields"], [])
+        self.assertEqual(plan["params"]["launchMode"], "project_backend")
+        self.assertEqual(plan["params"]["launcherModule"], "dexbotic.rl.model_rl_libero_pi0")
+        self.assertEqual(plan["params"]["rlinfExtModule"], "dexbotic.rl.rlinf_registry")
+        backend_interface = plan["params"]["backendInterface"]
+        self.assertEqual(backend_interface["backendKind"], "rlinf")
+        self.assertEqual(backend_interface["registryInjection"]["env"], "RLINF_EXT_MODULE")
+        self.assertIn("rlinf", backend_interface["preflight"]["imports"])
+        self.assertIn("VLA_RL_CONTRACT_PATH", backend_interface["envExports"])
+        self.assertIn("run_contract.json", backend_interface["artifactContract"]["contractFile"])
+        self.assertIn("import importlib", plan["stages"][2]["command"])
+        self.assertIn("dexbotic.rl.rlinf_registry", plan["stages"][2]["command"])
+        self.assertIn("import importlib", plan["stages"][2]["command"])
+        self.assertIn("rlinf", plan["stages"][2]["command"])
+        self.assertIn("run_contract.json", plan["stages"][3]["command"])
+        self.assertIn("backendInterface", plan["stages"][3]["command"])
+        self.assertIn("export RLINF_EXT_MODULE=dexbotic.rl.rlinf_registry", plan["stages"][4]["command"])
+        self.assertIn("python -m dexbotic.rl.model_rl_libero_pi0", plan["stages"][4]["command"])
+        self.assertIn("--suite=libero_goal", plan["stages"][4]["command"])
+        self.assertIn("--dataset_path /root/autodl-tmp/datasets/libero", plan["stages"][4]["command"])
+        self.assertIn("--artifact_path /root/autodl-tmp/evo_train/jobs/dexbotic-rl/artifacts", plan["stages"][4]["command"])
+
+    def test_rlinf_vla_project_backend_requires_launcher_module(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "params": {
+                        "launchMode": "project_backend",
+                        "configName": "libero_goal_ppo_dexbotic_pi0",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertIn("launcherModule", response["plan"]["missingFields"])
+        self.assertFalse(response["plan"]["readyToStart"])
+
+    def test_vla_rl_plan_preserves_configured_backend_interface(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "vla_rl_backend",
+                    "params": {
+                        "backendKind": "mybackend",
+                        "launchMode": "project_backend",
+                        "repoUrl": "https://github.com/example/mybackend.git",
+                        "workdir": "/root/autodl-tmp/mybackend",
+                        "configName": "mybackend_smoke",
+                        "launcherModule": "mybackend.train",
+                        "backendExtModule": "mybackend.registry",
+                        "datasetPath": "/root/autodl-tmp/datasets/demo",
+                        "backendInterface": {
+                            "interfaceVersion": "vla-rl-backend/v1",
+                            "workflow": "vla_rl_backend",
+                            "useLauncherContract": True,
+                            "requiredParams": ["repoUrl", "launcherModule", "datasetPath", "artifactPath"],
+                            "preflightImports": ["launcherModule", "backendExtModule"],
+                            "preflightChecks": ["import mybackend"],
+                            "usePreflightCommands": True,
+                            "preflightCommands": ["test -d {datasetPath}", "mkdir -p {artifactPath}"],
+                            "envExports": {
+                                "MYBACKEND_DATASET": "datasetPath",
+                                "MYBACKEND_MODE": "literal:smoke",
+                            },
+                            "launcherContract": {
+                                "python_module": "python -m {launcherModule} --data {datasetPath} --out {artifactPath}"
+                            },
+                            "artifactContract": {"contractFile": "run_contract.json"},
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        backend_interface = response["plan"]["params"]["backendInterface"]
+        self.assertEqual(response["message"], "plan generated")
+        self.assertEqual(backend_interface["backendKind"], "mybackend")
+        self.assertEqual(backend_interface["preflightChecks"], ["import mybackend"])
+        self.assertNotIn("artifactPath", response["plan"]["missingFields"])
+        self.assertIn("mybackend.registry", response["plan"]["stages"][2]["command"])
+        self.assertIn("test -d /root/autodl-tmp/datasets/demo", response["plan"]["stages"][2]["command"])
+        self.assertIn("mkdir -p /root/autodl-tmp/mybackend/outputs", response["plan"]["stages"][2]["command"])
+        self.assertIn("export MYBACKEND_DATASET=/root/autodl-tmp/datasets/demo", response["plan"]["stages"][4]["command"])
+        self.assertIn("export MYBACKEND_MODE=smoke", response["plan"]["stages"][4]["command"])
+        self.assertIn("backendInterface", response["plan"]["stages"][3]["command"])
+        self.assertIn("python -m mybackend.train --data /root/autodl-tmp/datasets/demo --out /root/autodl-tmp/mybackend/outputs", response["plan"]["stages"][4]["command"])
+
+    def test_vla_rl_plan_uses_backend_interface_required_params(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "vla_rl_backend",
+                    "params": {
+                        "backendKind": "mybackend",
+                        "launchMode": "project_backend",
+                        "repoUrl": "https://github.com/example/mybackend.git",
+                        "workdir": "/root/autodl-tmp/mybackend",
+                        "configName": "mybackend_smoke",
+                        "launcherModule": "mybackend.train",
+                        "datasetPath": "/root/autodl-tmp/datasets/demo",
+                        "backendInterface": {
+                            "interfaceVersion": "vla-rl-backend/v1",
+                            "workflow": "vla_rl_backend",
+                            "requiredParams": ["rewardModule"],
+                            "preflightImports": ["launcherModule", "rewardModule"],
+                            "artifactContract": {"contractFile": "run_contract.json"},
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertIn("rewardModule", response["plan"]["missingFields"])
+        self.assertFalse(response["plan"]["readyToStart"])
+
+    def test_vla_rl_plan_rejects_unsupported_interface_launcher_kind(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "vla_rl_backend",
+                    "params": {
+                        "backendKind": "scriptbackend",
+                        "launchMode": "project_backend",
+                        "launcherKind": "python_module",
+                        "repoUrl": "https://github.com/example/scriptbackend.git",
+                        "workdir": "/root/autodl-tmp/scriptbackend",
+                        "configName": "scriptbackend_smoke",
+                        "launcherModule": "scriptbackend.train",
+                        "datasetPath": "/root/autodl-tmp/datasets/demo",
+                        "backendInterface": {
+                            "interfaceVersion": "vla-rl-backend/v1",
+                            "workflow": "vla_rl_backend",
+                            "launcherKinds": ["python_script"],
+                            "requiredParams": ["scriptPath"],
+                            "artifactContract": {"contractFile": "run_contract.json"},
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertIn("launcherKind", response["plan"]["missingFields"])
+        self.assertIn("scriptPath", response["plan"]["missingFields"])
+
+    def test_vla_rl_plan_loads_backend_interface_from_env(self) -> None:
+        configured = json.dumps(
+            {
+                "envbackend": {
+                    "interfaceVersion": "vla-rl-backend/v1",
+                    "workflow": "vla_rl_backend",
+                    "preflightChecks": ["import envbackend"],
+                    "artifactContract": {"contractFile": "run_contract.json"},
+                }
+            }
+        )
+        with patch.dict("os.environ", {"EVO_TRAIN_VLA_BACKEND_INTERFACES_JSON": configured}, clear=False):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "username": "pearl",
+                        "action": "AI配置训练",
+                        "workflow": "vla_rl_backend",
+                        "params": {
+                            "backendKind": "envbackend",
+                            "launchMode": "project_backend",
+                            "repoUrl": "https://github.com/example/envbackend.git",
+                            "workdir": "/root/autodl-tmp/envbackend",
+                            "configName": "envbackend_smoke",
+                            "launcherModule": "envbackend.train",
+                            "datasetPath": "/root/autodl-tmp/datasets/demo",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        backend_interface = response["plan"]["params"]["backendInterface"]
+        self.assertEqual(response["message"], "plan generated")
+        self.assertEqual(backend_interface["backendKind"], "envbackend")
+        self.assertEqual(backend_interface["preflightChecks"], ["import envbackend"])
+
+    def test_rlinf_vla_infers_project_backend_when_launcher_module_is_present(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "params": {
+                        "repoUrl": "https://github.com/dexmal/dexbotic.git",
+                        "workdir": "/root/autodl-tmp/dexbotic",
+                        "configName": "libero_goal_ppo_dexbotic_pi0",
+                        "launcherModule": "dexbotic.rl.model_rl_libero_pi0",
+                        "rlinfExtModule": "dexbotic.rl.rlinf_registry",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertEqual(response["plan"]["params"]["launchMode"], "project_backend")
+        self.assertIn("python -m dexbotic.rl.model_rl_libero_pi0", response["plan"]["stages"][4]["command"])
+
+    def test_message_about_dexbotic_rlinf_uses_project_backend_defaults(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "message": "用 Dexbotic 接 RLinf backend 在 LIBERO 上做 pi0 PPO 后训练",
+                    "provider": "autodl",
+                    "params": {
+                        "configName": "libero_goal_ppo_dexbotic_pi0",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["workflow"], "rlinf_vla")
+        self.assertEqual(plan["params"]["launchMode"], "project_backend")
+        self.assertEqual(plan["params"]["repoUrl"], "https://github.com/dexmal/dexbotic.git")
+        self.assertEqual(plan["params"]["launcherModule"], "dexbotic.rl.model_rl_libero_pi0")
+        self.assertEqual(plan["params"]["rlinfExtModule"], "dexbotic.rl.rlinf_registry")
+        self.assertEqual(plan["params"]["suite"], "libero_goal")
+        self.assertIn("algorithm.name=ppo", plan["params"]["overrides"])
+
+    def test_project_backend_supports_deepspeed_simplevla_rl_launcher(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "launchMode": "project_backend",
+                        "backendKind": "dexbotic",
+                        "launcherKind": "deepspeed_script",
+                        "repoUrl": "https://github.com/dexmal/dexbotic.git",
+                        "workdir": "/root/autodl-tmp/dexbotic",
+                        "scriptPath": "playground/benchmarks/libero/libero_simplevla_rl.py",
+                        "task": "train",
+                        "sftModelPath": "/root/autodl-tmp/checkpoints/pi0-sft",
+                        "datasetName": "libero_10",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "artifactPath": "/root/autodl-tmp/evo_train/jobs/simplevla-rl/artifacts",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["missingFields"], [])
+        self.assertEqual(plan["params"]["backendKind"], "dexbotic")
+        self.assertEqual(plan["params"]["launcherKind"], "deepspeed_script")
+        self.assertIn("test -f playground/benchmarks/libero/libero_simplevla_rl.py", plan["stages"][2]["command"])
+        self.assertIn("import importlib", plan["stages"][2]["command"])
+        self.assertNotIn("import torch", plan["stages"][2]["command"])
+        self.assertIn("deepspeed playground/benchmarks/libero/libero_simplevla_rl.py", plan["stages"][4]["command"])
+        self.assertIn("--task train", plan["stages"][4]["command"])
+        self.assertIn("--sft_model_path /root/autodl-tmp/checkpoints/pi0-sft", plan["stages"][4]["command"])
+        self.assertIn("--dataset_name libero_10", plan["stages"][4]["command"])
+
+    def test_project_backend_supports_optional_evaluation_stage(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "launchMode": "project_backend",
+                        "launcherKind": "python_module",
+                        "repoUrl": "https://github.com/example/roboclaw-vla.git",
+                        "workdir": "/root/autodl-tmp/roboclaw-vla",
+                        "configName": "libero_goal_pi0_ppo",
+                        "launcherModule": "roboclaw_vla.rl.launcher",
+                        "rlinfExtModule": "roboclaw_vla.rl.registry",
+                        "preflightModules": ["roboclaw_vla.rl.adapters"],
+                        "evalModule": "roboclaw_vla.rl.evaluate",
+                        "suite": "libero_goal",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "artifactPath": "/root/autodl-tmp/evo_train/jobs/roboclaw-vla/artifacts",
+                        "launcherArgs": ["--profile", "smoke"],
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(
+            [stage["name"] for stage in plan["stages"]],
+            ["prepare_code", "setup_env", "preflight", "write_contract", "train_rlinf_vla", "evaluate", "collect_artifacts"],
+        )
+        self.assertIn("roboclaw_vla.rl.adapters", plan["stages"][2]["command"])
+        self.assertIn("run_contract.json", plan["stages"][3]["command"])
+        self.assertIn("--profile smoke", plan["stages"][4]["command"])
+        self.assertIn("python -m roboclaw_vla.rl.evaluate", plan["stages"][5]["command"])
+        self.assertIn("--checkpoint_path", plan["stages"][5]["command"])
+
+    def test_roboclaw_grpo_profile_uses_real_import_preflight_and_config_template(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "builtinTrainingProfile": "roboclaw_grpo_backend",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "checkpointPath": "/root/autodl-tmp/checkpoints/pi0",
+                        "artifactPath": "/root/autodl-tmp/evo_train/jobs/roboclaw-grpo/artifacts",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["missingFields"], [])
+        self.assertEqual(plan["params"]["builtinTrainingProfile"], "roboclaw_grpo_backend")
+        self.assertEqual(plan["params"]["algorithm"], "grpo")
+        self.assertEqual(plan["params"]["groupSize"], 8)
+        self.assertEqual(plan["params"]["placementStrategy"], "single_node")
+        self.assertEqual(plan["params"]["configName"], "libero_10_grpo_roboclaw")
+        self.assertEqual(plan["params"]["configPath"], "roboclaw_vla/config/rl/libero_10_grpo_roboclaw.yaml")
+        self.assertIn("test -f roboclaw_vla/config/rl/libero_10_grpo_roboclaw.yaml", plan["stages"][2]["command"])
+        self.assertIn("importlib.import_module", plan["stages"][2]["command"])
+        self.assertIn("rlinf", plan["stages"][2]["command"])
+        self.assertIn("roboclaw_vla.rl.registry", plan["stages"][2]["command"])
+        self.assertIn("roboclaw_vla.rl.launcher", plan["stages"][2]["command"])
+        self.assertIn("algorithm.group_size=8", plan["params"]["overrides"])
+        self.assertIn('"placementStrategy": "single_node"', plan["stages"][3]["command"])
+
+    def test_pi0_grpo_request_selects_roboclaw_grpo_profile(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "modelFamily": "pi0",
+                        "algorithm": "grpo",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "checkpointPath": "/root/autodl-tmp/checkpoints/pi0",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["params"]["builtinTrainingProfile"], "roboclaw_grpo_backend")
+        self.assertEqual(plan["params"]["configName"], "libero_10_grpo_roboclaw")
+        self.assertEqual(plan["params"]["groupSize"], 8)
+
+    def test_roboclaw_grpo_hydra_defaults_chain_exists(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "roboclaw" / "config" / "rl"
+
+        for relative_path in (
+            "libero_10_grpo_roboclaw.yaml",
+            "env/libero_10.yaml",
+            "model/roboclaw_pi0.yaml",
+            "training_backend/fsdp.yaml",
+        ):
+            self.assertTrue((root / relative_path).is_file(), relative_path)
+
+        main_config = (root / "libero_10_grpo_roboclaw.yaml").read_text(encoding="utf-8")
+        env_config = (root / "env" / "libero_10.yaml").read_text(encoding="utf-8")
+        model_config = (root / "model" / "roboclaw_pi0.yaml").read_text(encoding="utf-8")
+        fsdp_config = (root / "training_backend" / "fsdp.yaml").read_text(encoding="utf-8")
+        self.assertIn("env/libero_10@env.train", main_config)
+        self.assertIn("env/libero_10@env.eval", main_config)
+        self.assertIn("model/roboclaw_pi0@actor.model", main_config)
+        self.assertIn("training_backend/fsdp@actor.fsdp_config", main_config)
+        self.assertIn("total_num_envs: 16", env_config)
+        self.assertIn("is_eval: true", env_config)
+        self.assertIn("add_value_head: true", model_config)
+        self.assertIn("precision: bfloat16", model_config)
+        self.assertNotIn("torch_dtype", model_config)
+        self.assertIn("enable_gradient_accumulation: true", fsdp_config)
+        self.assertIn("mixed_precision:", fsdp_config)
+        self.assertIn("use_orig_params: false", fsdp_config)
+
+    def test_generic_vla_rl_backend_does_not_force_rlinf_import(self) -> None:
+        for backend_kind in (
+            "lerobot",
+            "dexbotic",
+            "custom",
+        ):
+            with self.subTest(backend_kind=backend_kind):
+                response = server_function.handle_request(
+                    json.dumps(
+                        {
+                            "username": "pearl",
+                            "action": "AI配置训练",
+                            "workflow": "vla_rl_backend",
+                            "provider": "autodl",
+                            "params": {
+                                "backendKind": backend_kind,
+                                "launchMode": "project_backend",
+                                "launcherKind": "python_module",
+                                "repoUrl": f"https://github.com/example/{backend_kind}-train.git",
+                                "workdir": f"/root/autodl-tmp/{backend_kind}-train",
+                                "configName": f"{backend_kind}_smoke",
+                                "launcherModule": f"project.{backend_kind}.launch",
+                                "backendExtModule": f"project.{backend_kind}.registry",
+                                "datasetPath": f"/root/autodl-tmp/datasets/{backend_kind}",
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+                self.assertEqual(response["message"], "plan generated")
+                plan = response["plan"]
+                self.assertEqual(plan["workflow"], "vla_rl_backend")
+                self.assertEqual(plan["missingFields"], [])
+                self.assertEqual(plan["params"]["backendKind"], backend_kind)
+                self.assertEqual(plan["params"]["backendExtModule"], f"project.{backend_kind}.registry")
+                self.assertEqual([stage["name"] for stage in plan["stages"]][4], "train_vla_rl_backend")
+                self.assertIn(f"VLA_RL_BACKEND_KIND={backend_kind}", plan["stages"][4]["command"])
+                self.assertIn(f"VLA_RL_BACKEND_EXT_MODULE=project.{backend_kind}.registry", plan["stages"][4]["command"])
+                self.assertIn(f"project.{backend_kind}.registry", plan["stages"][2]["command"])
+                self.assertNotIn("importlib.import_module('rlinf')", plan["stages"][2]["command"])
+
+    def test_vla_release_capabilities_are_normalized_into_contract_fields(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "message": "用 Pi0.5 co-training 在 XLeRobot 上做 action expert 和 LLM 联合优化，Blackwell 镜像",
+                    "provider": "autodl",
+                    "params": {
+                        "configName": "xlerobot_pi05_cotrain",
+                        "launcherModule": "project.training.pi05_cotrain",
+                        "backendExtModule": "project.training.registry",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["workflow"], "rlinf_vla")
+        self.assertEqual(plan["params"]["modelFamily"], "pi0.5")
+        self.assertEqual(plan["params"]["trainingMode"], "co_training")
+        self.assertEqual(plan["params"]["coTrainingTargets"], ["action_expert", "llm"])
+        self.assertEqual(plan["params"]["robotAdapter"], "xlerobot")
+        self.assertEqual(plan["params"]["imageProfile"], "blackwell")
+        stage_commands = "\n".join(stage["command"] for stage in plan["stages"])
+        self.assertIn("VLA_RL_MODEL_FAMILY=pi0.5", stage_commands)
+        self.assertIn("VLA_RL_TRAINING_MODE=co_training", stage_commands)
+
+    def test_vla_release_model_aliases_cover_navigation_and_gr00t(self) -> None:
+        nav = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "message": "用 Uni-NaVid 做导航 VLA+RL 后训练",
+                    "params": {"configName": "uni_navid_nav_smoke"},
+                },
+                ensure_ascii=False,
+            )
+        )
+        gr00t = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "message": "GR00TN1 在 SO-101 上接 RLinf backend",
+                    "params": {"configName": "gr00tn1_so101_smoke"},
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(nav["plan"]["workflow"], "rlinf_vla")
+        self.assertEqual(nav["plan"]["params"]["modelFamily"], "uni-navid")
+        self.assertEqual(nav["plan"]["params"]["trainingMode"], "rl_post_train")
+        self.assertEqual(gr00t["plan"]["params"]["modelFamily"], "gr00tn1")
+        self.assertEqual(gr00t["plan"]["params"]["robotAdapter"], "so-101")
+
+    def test_builtin_training_profile_fills_verified_dexbotic_dm0_launcher(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "params": {
+                        "modelFamily": "dm0",
+                        "configName": "libero_goal_ppo_dexbotic_dm0",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "artifactPath": "/root/autodl-tmp/evo_train/jobs/dm0-rl/artifacts",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["missingFields"], [])
+        self.assertEqual(plan["params"]["builtinTrainingProfile"], "dexbotic_dm0_rlinf")
+        self.assertEqual(plan["params"]["launcherModule"], "dexbotic.rl.model_rl_libero_dm0")
+        self.assertEqual(plan["params"]["rlinfExtModule"], "dexbotic.rl.rlinf_registry")
+        self.assertEqual(plan["params"]["trainingMode"], "rl_post_train")
+        self.assertIn("python -m dexbotic.rl.model_rl_libero_dm0", plan["stages"][4]["command"])
+
+    def test_builtin_training_profile_supports_simplevla_deepspeed_route(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "params": {
+                        "builtinTrainingProfile": "dexbotic_simplevla_rl",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "datasetName": "libero_10",
+                        "sftModelPath": "/root/autodl-tmp/checkpoints/pi0-sft",
+                        "artifactPath": "/root/autodl-tmp/evo_train/jobs/simplevla/artifacts",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["missingFields"], [])
+        self.assertEqual(plan["params"]["backendKind"], "dexbotic")
+        self.assertEqual(plan["params"]["launcherKind"], "deepspeed_script")
+        self.assertEqual(plan["params"]["scriptPath"], "playground/benchmarks/libero/libero_simplevla_rl.py")
+        self.assertIn("deepspeed playground/benchmarks/libero/libero_simplevla_rl.py", plan["stages"][4]["command"])
+
     def test_custom_project_plan_keeps_general_training_simple(self) -> None:
         response = server_function.handle_request(
             json.dumps(
@@ -571,6 +1250,49 @@ class ServerFunctionTests(unittest.TestCase):
 
         self.assertEqual(job_id, "pro-1::runner-1")
 
+    def test_autodl_remote_command_creates_log_directory_before_nohup_redirect(self) -> None:
+        platform = AutoDLPlatform(host="demo.autodl", port=22, user="root", key_path="/tmp/key")
+
+        command = platform._build_remote_command("runner-1", "python3 -V", "/root")
+
+        job_dir = "/root/autodl-tmp/evo_train/jobs/evo_train_runner-1"
+        self.assertTrue(command.startswith(f"mkdir -p {job_dir}; nohup "))
+        self.assertIn(f">{job_dir}/run.log", command)
+
+    def test_autodl_exec_drains_output_before_waiting_for_exit_status(self) -> None:
+        events: list[str] = []
+
+        class FakeChannel:
+            def recv_exit_status(self) -> int:
+                events.append("exit")
+                return 0
+
+        class FakeStream:
+            def __init__(self, label: str, payload: bytes) -> None:
+                self.label = label
+                self.payload = payload
+                self.channel = FakeChannel()
+
+            def read(self) -> bytes:
+                events.append(self.label)
+                return self.payload
+
+        class FakeClient:
+            def exec_command(self, command: str):
+                events.append(f"exec:{command}")
+                return None, FakeStream("stdout", b"ok\n"), FakeStream("stderr", b"")
+
+            def close(self) -> None:
+                events.append("close")
+
+        platform = AutoDLPlatform(host="demo.autodl", port=22, user="root", key_path="/tmp/key")
+
+        with patch.object(platform, "_connect", return_value=FakeClient()):
+            exit_status, stdout, stderr = platform._exec("python3 -V")
+
+        self.assertEqual((exit_status, stdout, stderr), (0, "ok", ""))
+        self.assertEqual(events, ["exec:python3 -V", "stdout", "stderr", "exit", "close"])
+
     def test_autodl_managed_platform_can_use_snapshot_ssh_connection(self) -> None:
         class FakeApi:
             def snapshot(self, instance_uuid: str) -> dict[str, object]:
@@ -668,6 +1390,160 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["images"][0]["autodlImageUuid"], "image-cu121")
         self.assertEqual(response["images"][0]["cudaVFrom"], "121")
         self.assertTrue(response["images"][0]["readyToStart"])
+
+    def test_runtime_match_scores_gpu_and_image_capabilities(self) -> None:
+        skus = json.dumps(
+            [
+                {
+                    "skuId": "autodl-4090d",
+                    "provider": "autodl",
+                    "displayName": "RTX 4090D",
+                    "gpuSpec": "4090d",
+                    "autodlGpuSpecUuid": "4090D",
+                    "gpuCount": 1,
+                    "costHourlyCents": 900,
+                    "gpuMemoryGb": 24,
+                    "supportedBackends": ["rlinf", "lerobot"],
+                    "supportedModels": ["pi0", "dm0"],
+                    "supportedBenchmarks": ["libero", "maniskill"],
+                    "supportedAlgorithms": ["grpo", "ppo"],
+                    "supportedTrainingModes": ["rl_post_train"],
+                    "capabilities": ["cuda121", "rollout_video"],
+                    "simFrameworks": ["mujoco"],
+                },
+                {
+                    "skuId": "autodl-small",
+                    "provider": "autodl",
+                    "displayName": "Small GPU",
+                    "gpuSpec": "small",
+                    "autodlGpuSpecUuid": "small",
+                    "gpuCount": 1,
+                    "costHourlyCents": 100,
+                    "gpuMemoryGb": 8,
+                    "supportedBackends": ["lerobot"],
+                    "supportedModels": ["act"],
+                    "supportedBenchmarks": ["metaworld"],
+                },
+            ]
+        )
+        images = json.dumps(
+            [
+                {
+                    "imageId": "vla-rlinf-cu121",
+                    "displayName": "VLA RLinf CUDA 12.1",
+                    "autodlImageUuid": "image-rlinf",
+                    "cudaVFrom": 121,
+                    "supportedBackends": ["rlinf"],
+                    "supportedModels": ["pi0", "dm0"],
+                    "supportedBenchmarks": ["libero", "maniskill"],
+                    "supportedAlgorithms": ["grpo", "ppo"],
+                    "supportedTrainingModes": ["rl_post_train"],
+                    "frameworks": ["rlinf", "roboclaw"],
+                    "capabilities": ["cuda121", "libero_assets"],
+                    "datasetFormats": ["libero"],
+                },
+                {
+                    "imageId": "lerobot-cu121",
+                    "displayName": "LeRobot CUDA 12.1",
+                    "autodlImageUuid": "image-lerobot",
+                    "cudaVFrom": 121,
+                    "supportedBackends": ["lerobot"],
+                    "supportedModels": ["act"],
+                    "supportedBenchmarks": ["metaworld"],
+                    "frameworks": ["lerobot"],
+                },
+            ]
+        )
+
+        with patch.dict("os.environ", {"AUTODL_GPU_SKUS_JSON": skus, "AUTODL_IMAGES_JSON": images}, clear=True):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "action": "训练运行时匹配",
+                        "provider": "autodl",
+                        "params": {
+                            "backendKind": "rlinf",
+                            "modelFamily": "pi0",
+                            "benchmark": "libero",
+                            "algorithm": "grpo",
+                            "trainingMode": "rl_post_train",
+                            "requiredCapabilities": ["cuda121", "mujoco", "libero_assets"],
+                            "minGpuMemoryGb": 24,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "runtime match success")
+        self.assertTrue(response["readyToStart"])
+        self.assertEqual(response["matches"][0]["sku"]["skuId"], "autodl-4090d")
+        self.assertEqual(response["matches"][0]["image"]["imageId"], "vla-rlinf-cu121")
+        self.assertTrue(response["matches"][0]["compatible"])
+        self.assertIn("gpu memory ok: 24GB", response["matches"][0]["reasons"])
+        self.assertIn("capabilities ok: cuda121, mujoco, libero_assets", response["matches"][0]["reasons"])
+        self.assertTrue(any(match["blockingReasons"] for match in response["matches"][1:]))
+
+    def test_runtime_match_blocks_incompatible_gpu_and_image_pair(self) -> None:
+        skus = json.dumps(
+            [
+                {
+                    "skuId": "autodl-small",
+                    "provider": "autodl",
+                    "displayName": "Small GPU",
+                    "autodlGpuSpecUuid": "small",
+                    "gpuCount": 1,
+                    "costHourlyCents": 100,
+                    "gpuMemoryGb": 8,
+                    "supportedBackends": ["lerobot"],
+                    "supportedModels": ["act"],
+                    "supportedBenchmarks": ["metaworld"],
+                    "capabilities": ["cuda121"],
+                }
+            ]
+        )
+        images = json.dumps(
+            [
+                {
+                    "imageId": "lerobot-cu121",
+                    "displayName": "LeRobot CUDA 12.1",
+                    "autodlImageUuid": "image-lerobot",
+                    "cudaVFrom": 121,
+                    "supportedBackends": ["lerobot"],
+                    "supportedModels": ["act"],
+                    "supportedBenchmarks": ["metaworld"],
+                    "capabilities": ["cuda121"],
+                }
+            ]
+        )
+
+        with patch.dict("os.environ", {"AUTODL_GPU_SKUS_JSON": skus, "AUTODL_IMAGES_JSON": images}, clear=True):
+            response = server_function.handle_request(
+                json.dumps(
+                    {
+                        "action": "训练运行时匹配",
+                        "provider": "autodl",
+                        "params": {
+                            "backendKind": "rlinf",
+                            "modelFamily": "pi0",
+                            "benchmark": "libero",
+                            "requiredCapabilities": ["cuda121", "libero_assets"],
+                            "minGpuMemoryGb": 24,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        self.assertEqual(response["message"], "runtime match success")
+        self.assertFalse(response["readyToStart"])
+        self.assertEqual(len(response["matches"]), 1)
+        match = response["matches"][0]
+        self.assertFalse(match["compatible"])
+        self.assertIn("sku does not support backend: rlinf", match["blockingReasons"])
+        self.assertIn("image does not support benchmark: libero", match["blockingReasons"])
+        self.assertIn("gpu memory too small: 8GB < 24GB", match["blockingReasons"])
+        self.assertIn("missing capabilities: libero_assets", match["blockingReasons"])
 
     def test_gpu_sku_query_hides_incomplete_default_skus(self) -> None:
         with patch.dict("os.environ", {}, clear=True):

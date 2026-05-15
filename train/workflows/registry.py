@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Callable
 
 from .base import WorkflowPlan
-from . import custom_project, evf_libero, evf_metaworld
+from . import custom_project, evf_libero, evf_metaworld, rlinf_vla
 
 
 WorkflowBuilder = Callable[[dict[str, Any], dict[str, Any]], WorkflowPlan]
@@ -14,6 +13,8 @@ WORKFLOWS: dict[str, WorkflowBuilder] = {
     custom_project.WORKFLOW_NAME: custom_project.build_plan,
     evf_metaworld.WORKFLOW_NAME: evf_metaworld.build_plan,
     evf_libero.WORKFLOW_NAME: evf_libero.build_plan,
+    rlinf_vla.WORKFLOW_NAME: rlinf_vla.build_plan,
+    rlinf_vla.GENERIC_WORKFLOW_NAME: rlinf_vla.build_plan,
 }
 
 
@@ -38,6 +39,18 @@ def infer_workflow(request: dict[str, Any], params: dict[str, Any]) -> str:
     if workflow:
         return workflow
     message = str(request.get("message") or request.get("prompt") or "").lower()
+    if (
+        "rlinf" in message
+        or "vla+rl" in message
+        or "后训练" in message
+        or "grpo" in message
+        or "ppo" in message
+        or "dexbotic" in message
+        or "co-training" in message
+        or "共训练" in message
+        or "联合优化" in message
+    ):
+        return rlinf_vla.WORKFLOW_NAME
     if "repo" in message or "github" in message or "自定义" in message or "自己的项目" in message:
         return custom_project.WORKFLOW_NAME
     if "libero" in message:
@@ -45,27 +58,8 @@ def infer_workflow(request: dict[str, Any], params: dict[str, Any]) -> str:
     return evf_metaworld.WORKFLOW_NAME
 
 
-def enrich_params_from_message(request: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
-    enriched = dict(params)
-    message = str(request.get("message") or request.get("prompt") or "")
-    lowered = message.lower()
-    epochs_match = re.search(r"(\d+)\s*(?:个)?\s*(?:epoch|epochs|轮)", lowered)
-    if epochs_match and "epochs" not in enriched:
-        enriched["epochs"] = int(epochs_match.group(1))
-    eval_match = re.search(r"(\d+)\s*(?:个)?\s*(?:eval|评估|episode|episodes)", lowered)
-    if eval_match and "evalEpisodes" not in enriched:
-        enriched["evalEpisodes"] = int(eval_match.group(1))
-    if "pick-place" in lowered and "envName" not in enriched:
-        enriched["envName"] = "pick-place-v2"
-    if "libero_object" in lowered and "suite" not in enriched:
-        enriched["suite"] = "libero_object_task"
-    elif "libero" in lowered and "suite" not in enriched:
-        enriched["suite"] = "libero_object_task"
-    return enriched
-
-
 def build_training_plan(request: dict[str, Any]) -> WorkflowPlan:
-    params = enrich_params_from_message(request, parse_params(request.get("params")))
+    params = parse_params(request.get("params"))
     workflow = infer_workflow(request, params)
     builder = WORKFLOWS.get(workflow)
     if builder is None:
@@ -88,7 +82,7 @@ def materialize_training_request(request: dict[str, Any]) -> dict[str, Any]:
     materialized["datasetPath"] = plan.dataset_path
     materialized["checkpointPath"] = plan.checkpoint_path
     materialized["checkpointFrequency"] = materialized.get("checkpointFrequency") or 1
-    materialized["epochs"] = materialized.get("epochs") or plan.params.get("epochs")
+    materialized["epochs"] = materialized.get("epochs") or plan.params.get("epochs") or 1
     materialized["gpuSpec"] = materialized.get("gpuSpec") or plan.gpu_spec
     materialized["hourlyPriceCents"] = materialized.get("hourlyPriceCents") or plan.hourly_price_cents
     if plan.provider == "autodl":
