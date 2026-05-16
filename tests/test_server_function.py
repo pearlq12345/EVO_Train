@@ -961,6 +961,33 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(plan["params"]["configName"], "libero_10_grpo_roboclaw")
         self.assertEqual(plan["params"]["groupSize"], 8)
 
+    def test_rynnvla_request_selects_lerobot_project_backend(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "modelFamily": "rynnvla",
+                        "datasetPath": "/root/autodl-tmp/datasets/rynnvla",
+                        "checkpointPath": "/root/autodl-tmp/checkpoints/rynnvla",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["params"]["builtinTrainingProfile"], "rynnvla_lerobot")
+        self.assertEqual(plan["params"]["backendKind"], "lerobot")
+        self.assertEqual(plan["params"]["policyFamily"], "rynnvla")
+        self.assertEqual(plan["params"]["repoUrl"], "https://github.com/alibaba-damo-academy/RynnVLA-001.git")
+        self.assertEqual(plan["params"]["scriptPath"], "train.py")
+        self.assertEqual(plan["params"]["configName"], "lerobot_exp")
+
     def test_roboclaw_grpo_hydra_defaults_chain_exists(self) -> None:
         root = Path(__file__).resolve().parents[1] / "roboclaw" / "config" / "rl"
 

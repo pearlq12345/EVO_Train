@@ -75,6 +75,20 @@ BUILTIN_TRAINING_PROFILES: dict[str, dict[str, Any]] = {
         "successMetric": "success_rate",
         "metricPaths": ["{artifactPath}/metrics.json", "{artifactPath}/eval_info.json"],
     },
+    "rynnvla_lerobot": {
+        "backendKind": "lerobot",
+        "launchMode": "project_backend",
+        "launcherKind": "python_script",
+        "repoUrl": "https://github.com/alibaba-damo-academy/RynnVLA-001.git",
+        "workdir": "/root/autodl-tmp/RynnVLA-001",
+        "scriptPath": "train.py",
+        "configName": "lerobot_exp",
+        "configPath": "configs/lerobot/lerobot_exp.yml",
+        "policyFamily": "rynnvla",
+        "trainingMode": "supervised_finetune",
+        "successMetric": "eval/loss",
+        "metricPaths": ["{artifactPath}/metrics.json"],
+    },
 }
 
 MODEL_DEFAULT_PROFILES: dict[str, str] = {
@@ -87,6 +101,7 @@ MODEL_DEFAULT_PROFILES: dict[str, str] = {
     "oft": "roboclaw_rlinf_backend",
     "navila": "roboclaw_rlinf_backend",
     "uni-navid": "roboclaw_rlinf_backend",
+    "rynnvla": "rynnvla_lerobot",
 }
 
 
