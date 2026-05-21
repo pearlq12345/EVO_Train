@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import WorkflowPlan, WorkflowStage, build_runner_command, param_int, param_string, quote_args
+from .source_resolver import resolve_source_uri
 
 
 WORKFLOW_NAME = "rlinf_vla"
@@ -462,6 +463,46 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
     contract_path = param_string(params, "contractPath", f"{artifact_path}/run_contract.json")
     dataset_path = param_string(params, "datasetPath")
     checkpoint_path = param_string(params, "checkpointPath", artifact_path)
+    dataset_source = dict(params.get("datasetSource")) if isinstance(params.get("datasetSource"), dict) else {}
+    model_source = dict(params.get("modelSource")) if isinstance(params.get("modelSource"), dict) else {}
+    source_contract = dict(params.get("sourceContract")) if isinstance(params.get("sourceContract"), dict) else {}
+    resolved_model_source = (
+        dict(params.get("resolvedModelSource")) if isinstance(params.get("resolvedModelSource"), dict) else {}
+    )
+    dataset_source_kind = param_string(params, "datasetSourceKind")
+    model_source_kind = param_string(params, "modelSourceKind")
+    dataset_format = param_string(params, "datasetFormat")
+    checkpoint_format = param_string(params, "checkpointFormat")
+    dataset_auth_ref = param_string(params, "datasetAuthRef")
+    model_auth_ref = param_string(params, "modelAuthRef")
+    source_cache_root = param_string(params, "sourceCacheRoot", "/root/autodl-tmp/evo_studio/cache")
+    dataset_resolution = resolve_source_uri(
+        dataset_path,
+        role="dataset",
+        cache_root=source_cache_root,
+        auth_ref=dataset_auth_ref,
+        source_type=dataset_source_kind,
+        source_format=dataset_format,
+    )
+    model_resolution = resolve_source_uri(
+        checkpoint_path,
+        role="model",
+        cache_root=source_cache_root,
+        auth_ref=model_auth_ref,
+        source_type=model_source_kind,
+        source_format=checkpoint_format,
+    )
+    if dataset_resolution.resolved_path:
+        dataset_path = dataset_resolution.resolved_path
+    if model_resolution.resolved_path:
+        checkpoint_path = model_resolution.resolved_path
+    source_resolutions = {
+        "dataset": dataset_resolution.to_contract(),
+        "model": model_resolution.to_contract(),
+    }
+    source_resolve_commands = [
+        resolution.command for resolution in (dataset_resolution, model_resolution) if resolution.command
+    ]
     metric_paths = _param_list(params, "metricPaths") or [f"{artifact_path}/metrics.json"]
     result_files = _param_list(params, "resultFiles")
     success_metric = param_string(params, "successMetric", "success_rate")
@@ -517,8 +558,11 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
         warnings.append("repoUrl is empty; the selected image must already contain the RLinf code at workdir")
     if gpu_spec == "default":
         warnings.append("gpuSpec is default; RoboClaw should confirm the target GPU tier")
-    if not dataset_path:
+    if not dataset_path and dataset_source_kind != "builtin_benchmark":
         warnings.append("datasetPath is empty; confirm the RLinf config does not require an external dataset path")
+    for resolution in (dataset_resolution, model_resolution):
+        missing_fields.extend(resolution.missing_fields)
+        warnings.extend(resolution.warnings)
     if launch_mode == "project_backend" and not backend_ext_module:
         warnings.append("backendExtModule is empty; custom model registration must happen inside the launcher module")
 
@@ -638,6 +682,17 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
         "envModule": env_module,
         "rewardModule": reward_module,
         "suite": suite,
+        "datasetSource": dataset_source,
+        "modelSource": model_source,
+        "sourceContract": source_contract,
+        "sourceResolutions": source_resolutions,
+        "resolvedModelSource": resolved_model_source,
+        "datasetSourceKind": dataset_source_kind,
+        "modelSourceKind": model_source_kind,
+        "datasetFormat": dataset_format,
+        "checkpointFormat": checkpoint_format,
+        "datasetAuthRef": dataset_auth_ref,
+        "modelAuthRef": model_auth_ref,
         "datasetPath": dataset_path,
         "checkpointPath": checkpoint_path,
         "artifactPath": artifact_path,
@@ -676,6 +731,17 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
     stages.extend(
         [
             WorkflowStage("setup_env", f"cd {quote_args([workdir])} && {setup_command}"),
+        ]
+    )
+    if source_resolve_commands:
+        stages.append(
+            WorkflowStage(
+                "resolve_sources",
+                f"cd {quote_args([workdir])} && {' && '.join(source_resolve_commands)}",
+            )
+        )
+    stages.extend(
+        [
             WorkflowStage("preflight", preflight_command),
             WorkflowStage("write_contract", write_contract_command),
             WorkflowStage("train_rlinf_vla" if workflow_name == WORKFLOW_NAME else "train_vla_rl_backend", train_command),
@@ -719,6 +785,17 @@ def build_plan(request: dict[str, Any], params: dict[str, Any]) -> WorkflowPlan:
             "sftModelPath": sft_model_path,
             "datasetName": dataset_name,
             "task": task,
+            "datasetSource": dataset_source,
+            "modelSource": model_source,
+            "sourceContract": source_contract,
+            "sourceResolutions": source_resolutions,
+            "resolvedModelSource": resolved_model_source,
+            "datasetSourceKind": dataset_source_kind,
+            "modelSourceKind": model_source_kind,
+            "datasetFormat": dataset_format,
+            "checkpointFormat": checkpoint_format,
+            "datasetAuthRef": dataset_auth_ref,
+            "modelAuthRef": model_auth_ref,
             "launcherArgs": launcher_args,
             "evalModule": eval_module,
             "evalScriptPath": eval_script_path,

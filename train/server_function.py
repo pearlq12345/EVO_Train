@@ -7,6 +7,8 @@ import argparse
 import hmac
 import json
 import os
+import re
+import threading
 from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
@@ -65,6 +67,10 @@ USER_ACTIONS = {
     "训练运行时匹配",
     "运行时匹配",
 }
+
+RESPONSE_SCHEMA_VERSION = "roboclaw.train.v1"
+IDENTIFIER_PATTERN = re.compile(r"^[\w.@:-]{1,128}$", re.ASCII)
+PATH_FRAGMENT_FORBIDDEN = {"/", "\\", "\x00"}
 
 
 DEFAULT_AUTODL_SKUS = [
@@ -159,6 +165,95 @@ def _token_matches(provided: str, expected: str | None) -> bool:
     if not expected:
         return True
     return bool(provided) and hmac.compare_digest(provided, expected)
+
+
+def _request_id(request: dict[str, Any]) -> str:
+    return _request_string(request, "requestId") or _request_string(request, "traceId")
+
+
+def _invalid_identifier(value: str, field_name: str) -> str | None:
+    if not value:
+        return None
+    if any(fragment in value for fragment in PATH_FRAGMENT_FORBIDDEN) or ".." in value:
+        return f"invalid {field_name}: path fragments are not allowed"
+    if not IDENTIFIER_PATTERN.fullmatch(value):
+        return f"invalid {field_name}: use 1-128 ASCII letters, digits, '_', '-', '.', ':', or '@'"
+    return None
+
+
+def _validate_roboclaw_request(request: dict[str, Any], action: str, username: str, task_name: str) -> dict[str, Any] | None:
+    if not action:
+        return _response("invalid request", error_code="INVALID_ACTION", request=request)
+    if action not in ADMIN_ACTIONS and action not in USER_ACTIONS and action != "价格查询":
+        return _response("invalid action", error_code="INVALID_ACTION", request=request)
+    for field_name, value in (("username", username), ("taskName", task_name)):
+        error = _invalid_identifier(value, field_name)
+        if error:
+            return _response(error, error_code="INVALID_IDENTIFIER", request=request, tasks=[])
+    return None
+
+
+def _response(
+    message: str,
+    *,
+    ok: bool | None = None,
+    error_code: str | None = None,
+    request: dict[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "ok": ok if ok is not None else error_code is None,
+        "errorCode": error_code,
+        "message": message,
+        "schemaVersion": RESPONSE_SCHEMA_VERSION,
+    }
+    if request is not None:
+        request_id = _request_id(request)
+        if request_id:
+            response["requestId"] = request_id
+    response.update(extra)
+    return response
+
+
+def _error_code_from_message(message: str) -> str | None:
+    lowered = message.lower()
+    if not lowered:
+        return None
+    if "unauthorized" in lowered:
+        return "UNAUTHORIZED"
+    if "invalid json" in lowered:
+        return "INVALID_JSON"
+    if "invalid request" in lowered:
+        return "INVALID_REQUEST"
+    if "invalid action" in lowered:
+        return "INVALID_ACTION"
+    if "unsupported provider" in lowered:
+        return "UNSUPPORTED_PROVIDER"
+    if "insufficient balance" in lowered:
+        return "INSUFFICIENT_BALANCE"
+    if "missing required field" in lowered or "missing workflow fields" in lowered:
+        return "MISSING_REQUIRED_FIELD"
+    if "disabled" in lowered:
+        return "DISABLED"
+    if "failed" in lowered or "error" in lowered:
+        return "INTERNAL_ERROR"
+    return None
+
+
+def _finalize_response(response: dict[str, Any], request: dict[str, Any] | None = None) -> dict[str, Any]:
+    message = str(response.get("message") or "")
+    error_code = response.get("errorCode")
+    if error_code is None:
+        error_code = _error_code_from_message(message)
+    finalized = dict(response)
+    finalized.setdefault("schemaVersion", RESPONSE_SCHEMA_VERSION)
+    finalized["errorCode"] = error_code
+    finalized["ok"] = bool(finalized.get("ok", error_code is None))
+    if request is not None and "requestId" not in finalized:
+        request_id = _request_id(request)
+        if request_id:
+            finalized["requestId"] = request_id
+    return finalized
 
 
 def _authorization_error(request: dict[str, Any], action: str) -> dict[str, Any] | None:
@@ -741,6 +836,64 @@ def _build_job_config(request: dict[str, Any], task_name: str, provider: str) ->
     }
 
 
+def _submit_task_background(
+    *,
+    username: str,
+    task_name: str,
+    provider: str,
+    region: str,
+    job_config: dict[str, Any],
+    hourly_price_cents: int,
+) -> None:
+    try:
+        platform = get_platform(provider, region_id=region)
+        remote_job_id = platform.submit(job_config)
+        if not remote_job_id:
+            raise RuntimeError("missing remote job id")
+        sql_update_user_task(
+            username,
+            task_name,
+            status="Submitted",
+            remote_job_id=remote_job_id,
+            last_error="",
+        )
+    except BaseException as exc:
+        sql_refund_frozen_balance(username, task_name, hourly_price_cents, "background submit failed")
+        sql_update_user_task(
+            username,
+            task_name,
+            status="SubmitFailed",
+            billing_status="submit_failed",
+            last_error=str(exc),
+            stopped_at=utc_now_text(),
+        )
+
+
+def _start_background_submit(
+    *,
+    username: str,
+    task_name: str,
+    provider: str,
+    region: str,
+    job_config: dict[str, Any],
+    hourly_price_cents: int,
+) -> None:
+    thread = threading.Thread(
+        target=_submit_task_background,
+        kwargs={
+            "username": username,
+            "task_name": task_name,
+            "provider": provider,
+            "region": region,
+            "job_config": job_config,
+            "hourly_price_cents": hourly_price_cents,
+        },
+        name=f"evo-submit-{username}-{task_name}",
+        daemon=True,
+    )
+    thread.start()
+
+
 def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     if sql_get_user_task(username, task_name) is not None:
         return "create task failed", sql_get_user_all_task(username)
@@ -779,6 +932,35 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
             raise ValueError("missing required field: datasetPath")
         if not job_config["command"] and not job_config["checkpoint_path"]:
             raise ValueError("missing required field: checkpointPath")
+        if not _request_bool(request, "waitForSubmit") and not _request_bool(request, "syncSubmit"):
+            if job_config["dry_run"]:
+                sql_refund_frozen_balance(username, task_name, hourly_price_cents, "dry run")
+                return "dry run only", sql_get_user_all_task(username)
+            created = sql_add_user_task(
+                username,
+                task_name,
+                status="Submitting",
+                provider=provider,
+                checkpoint_path=str(job_config["checkpoint_path"] or ""),
+                dataset_path=str(job_config["dataset_path"] or ""),
+                hourly_price_cents=hourly_price_cents,
+                frozen_until=add_hours_text(utc_now_text(), 1),
+                started_at=utc_now_text(),
+                billing_status="frozen",
+            )
+            if not created:
+                sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task row create failed")
+                return "create task failed", sql_get_user_all_task(username)
+            _start_background_submit(
+                username=username,
+                task_name=task_name,
+                provider=provider,
+                region=_request_optional_string(request, "region") or "cn-hangzhou",
+                job_config=job_config,
+                hourly_price_cents=hourly_price_cents,
+            )
+            return "training accepted", sql_get_user_all_task(username)
+
         remote_job_id = platform.submit(job_config)
         if not remote_job_id and job_config["dry_run"]:
             sql_refund_frozen_balance(username, task_name, hourly_price_cents, "dry run")
@@ -1185,62 +1367,67 @@ def handle_request(text: str) -> dict[str, Any]:
     try:
         request = json.loads(text)
     except json.JSONDecodeError:
-        return {"message": "invalid json", "tasks": []}
+        return _finalize_response({"message": "invalid json", "tasks": []})
+    if not isinstance(request, dict):
+        return _finalize_response({"message": "invalid request", "tasks": []})
 
     username = _request_string(request, "username")
     task_name = _request_string(request, "taskName")
     action = _request_string(request, "action")
+    validation_error = _validate_roboclaw_request(request, action, username, task_name)
+    if validation_error is not None:
+        return validation_error
     auth_error = _authorization_error(request, action)
     if auth_error is not None:
-        return auth_error
+        return _finalize_response(auth_error, request)
 
     if action == "价格设置":
-        return _admin_set_price(request)
+        return _finalize_response(_admin_set_price(request), request)
     if action == "价格查询":
-        return _price_response(request)
+        return _finalize_response(_price_response(request), request)
     if action == "平台余额查询":
-        return _platform_balance_response(request)
+        return _finalize_response(_platform_balance_response(request), request)
     if action == "GPU规格查询":
-        return _gpu_sku_response(request)
+        return _finalize_response(_gpu_sku_response(request), request)
     if action == "AutoDL镜像查询":
-        return _autodl_image_response(request)
+        return _finalize_response(_autodl_image_response(request), request)
     if action in {"训练运行时匹配", "运行时匹配"}:
-        return _runtime_match_response(request)
+        return _finalize_response(_runtime_match_response(request), request)
 
     if action in {"余额查询", "账单查询", "管理员充值"} and not username:
-        return {"message": "invalid request", "tasks": []}
+        return _finalize_response({"message": "invalid request", "tasks": []}, request)
 
     if action == "余额查询":
-        return _wallet_response(username)
+        return _finalize_response(_wallet_response(username), request)
     if action == "账单查询":
-        return _billing_records_response(username)
+        return _finalize_response(_billing_records_response(username), request)
     if action == "管理员充值":
-        return _admin_set_balance(username, request)
+        return _finalize_response(_admin_set_balance(username, request), request)
     if action == "AI配置训练":
-        return _ai_training_plan_response(username, request)
+        return _finalize_response(_ai_training_plan_response(username, request), request)
 
     if action == "任务同步":
         response = _with_wallet(username, "sync success", _refresh_user_tasks(username, request))
         response["datasetDir"] = _list_user_dataset_dirs(username)
-        return response
+        return _finalize_response(response, request)
 
     if not username or not task_name:
-        return {"message": "invalid request", "tasks": sql_get_user_all_task(username)}
+        return _finalize_response({"message": "invalid request", "tasks": sql_get_user_all_task(username)}, request)
 
     if action == "开始训练":
         message, tasks = _create_task(username, task_name, request)
     elif action == "结束训练":
         message, tasks = _stop_task(username, task_name, request)
     elif action == "结果下载":
-        return _download_task_artifact(username, task_name, request)
+        return _finalize_response(_download_task_artifact(username, task_name, request), request)
     elif action == "下载损失":
-        return _download_loss_artifact(username, task_name, request)
+        return _finalize_response(_download_loss_artifact(username, task_name, request), request)
     elif action == "查询状态":
-        return _status_response(username, task_name, request)
+        return _finalize_response(_status_response(username, task_name, request), request)
     elif action == "查询下载目录":
-        return _download_directory_response(username, task_name)
+        return _finalize_response(_download_directory_response(username, task_name), request)
     elif action == "请求用户日志":
-        return _user_logs_response(username, task_name)
+        return _finalize_response(_user_logs_response(username, task_name), request)
     elif action == "删除任务":
         message = "delete task success" if sql_delete_user_task(username, task_name) else "delete task failed"
         tasks = sql_get_user_all_task(username)
@@ -1248,7 +1435,7 @@ def handle_request(text: str) -> dict[str, Any]:
         message = "invalid action"
         tasks = sql_get_user_all_task(username)
 
-    return _with_wallet(username, message, tasks)
+    return _finalize_response(_with_wallet(username, message, tasks), request)
 
 
 def handle_request_text(text: str) -> str:

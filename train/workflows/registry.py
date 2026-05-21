@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Callable
 
 from .base import WorkflowPlan
 from . import custom_project, evf_libero, evf_metaworld, rlinf_vla
+from .source_contract import normalize_training_sources, source_missing_fields, source_warnings
 
 
 WorkflowBuilder = Callable[[dict[str, Any], dict[str, Any]], WorkflowPlan]
@@ -59,12 +61,32 @@ def infer_workflow(request: dict[str, Any], params: dict[str, Any]) -> str:
 
 
 def build_training_plan(request: dict[str, Any]) -> WorkflowPlan:
-    params = parse_params(request.get("params"))
+    params = normalize_training_sources(parse_params(request.get("params")))
     workflow = infer_workflow(request, params)
     builder = WORKFLOWS.get(workflow)
     if builder is None:
         raise ValueError(f"unsupported workflow: {workflow}")
-    return builder(request, params)
+    plan = builder(request, params)
+    missing_fields = _merge_unique(plan.missing_fields, source_missing_fields(params))
+    warnings = _merge_unique(plan.warnings, source_warnings(params))
+    if missing_fields == plan.missing_fields and warnings == plan.warnings:
+        return plan
+    plan_params = dict(plan.params)
+    for key in (
+        "datasetSource",
+        "modelSource",
+        "sourceContract",
+        "datasetSourceKind",
+        "modelSourceKind",
+        "datasetFormat",
+        "checkpointFormat",
+        "datasetAuthRef",
+        "modelAuthRef",
+        "resolvedModelSource",
+    ):
+        if key in params:
+            plan_params[key] = params[key]
+    return replace(plan, params=plan_params, missing_fields=missing_fields, warnings=warnings)
 
 
 def materialize_training_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -88,3 +110,15 @@ def materialize_training_request(request: dict[str, Any]) -> dict[str, Any]:
     if plan.provider == "autodl":
         materialized["autodlManaged"] = materialized.get("autodlManaged", True)
     return materialized
+
+
+def _merge_unique(left: list[str], right: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*left, *right]:
+        text = str(item)
+        if text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+    return merged

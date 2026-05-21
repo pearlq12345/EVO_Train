@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +37,50 @@ class ServerFunctionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_response_envelope_echoes_roboclaw_request_id(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "requestId": "req-001",
+                    "username": "pearl",
+                    "action": "余额查询",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertIsNone(response["errorCode"])
+        self.assertEqual(response["requestId"], "req-001")
+        self.assertEqual(response["schemaVersion"], "roboclaw.train.v1")
+        self.assertEqual(response["message"], "wallet query success")
+
+    def test_invalid_json_uses_stable_error_envelope(self) -> None:
+        response = server_function.handle_request("{bad json")
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["errorCode"], "INVALID_JSON")
+        self.assertEqual(response["schemaVersion"], "roboclaw.train.v1")
+        self.assertEqual(response["tasks"], [])
+
+    def test_rejects_path_like_roboclaw_identifiers(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "requestId": "req-bad-name",
+                    "username": "pearl/../other",
+                    "taskName": "run-001",
+                    "action": "查询状态",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["errorCode"], "INVALID_IDENTIFIER")
+        self.assertEqual(response["requestId"], "req-bad-name")
+        self.assertIn("invalid username", response["message"])
+
     def test_start_training_submits_aliyun_job_and_persists_metadata(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 2000)
         request = json.dumps(
@@ -48,6 +94,7 @@ class ServerFunctionTests(unittest.TestCase):
                 "checkpointPath": "/mnt/checkpoints/run-001",
                 "checkpointFrequency": 1,
                 "gpuCount": 1,
+                "waitForSubmit": True,
             },
             ensure_ascii=False,
         )
@@ -73,6 +120,55 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(sql_pack.sql_get_wallet("pearl")["frozenCents"], "1000")
         self.assertEqual(response["wallet"]["balanceCents"], "2000")
         self.assertEqual(response["wallet"]["frozenCents"], "1000")
+
+    def test_start_training_returns_immediately_while_background_submit_runs(self) -> None:
+        sql_pack.sql_set_user_balance("pearl", 2000)
+        submit_started = threading.Event()
+        release_submit = threading.Event()
+        submit_done = threading.Event()
+
+        class SlowPlatform:
+            def submit(self, job_config: dict[str, object]) -> str:
+                submit_started.set()
+                release_submit.wait(timeout=2)
+                submit_done.set()
+                return "async-job-1"
+
+        request = json.dumps(
+            {
+                "requestId": "req-async-start",
+                "username": "pearl",
+                "taskName": "run-async",
+                "action": "开始训练",
+                "provider": "aliyun",
+                "datasetPath": "/mnt/data/demo",
+                "epochs": 3,
+                "checkpointPath": "/mnt/checkpoints/run-async",
+                "checkpointFrequency": 1,
+                "gpuCount": 1,
+            },
+            ensure_ascii=False,
+        )
+
+        with patch.object(server_function, "get_platform", return_value=SlowPlatform()):
+            response = server_function.handle_request(request)
+            self.assertEqual(response["message"], "training accepted")
+            self.assertEqual(response["requestId"], "req-async-start")
+            self.assertEqual(response["tasks"][0]["status"], "Submitting")
+            self.assertEqual(response["tasks"][0]["jobId"], "")
+            self.assertTrue(submit_started.wait(timeout=1))
+            release_submit.set()
+            self.assertTrue(submit_done.wait(timeout=1))
+
+        task = sql_pack.sql_get_user_task("pearl", "run-async")
+        for _ in range(20):
+            if task is not None and task["status"] == "Submitted":
+                break
+            time.sleep(0.01)
+            task = sql_pack.sql_get_user_task("pearl", "run-async")
+        self.assertIsNotNone(task)
+        self.assertEqual(task["status"], "Submitted")
+        self.assertEqual(task["jobId"], "async-job-1")
 
     def test_wallet_and_billing_actions_expose_user_balance_and_records(self) -> None:
         recharge = server_function.handle_request(
@@ -132,6 +228,7 @@ class ServerFunctionTests(unittest.TestCase):
                         "checkpointFrequency": 1,
                         "gpuCount": 1,
                         "gpuSpec": "ecs.gn7i-c8g1.2xlarge",
+                        "waitForSubmit": True,
                     },
                     ensure_ascii=False,
                 )
@@ -324,6 +421,7 @@ class ServerFunctionTests(unittest.TestCase):
                         "command": "python eval.py --suite libero_object_task",
                         "workdir": "/root/autodl-tmp/evf",
                         "hourlyPriceCents": 1200,
+                        "waitForSubmit": True,
                     },
                     ensure_ascii=False,
                 )
@@ -453,6 +551,7 @@ class ServerFunctionTests(unittest.TestCase):
                             "epochs": 5,
                             "evalEpisodes": 3,
                         },
+                        "waitForSubmit": True,
                     },
                     ensure_ascii=False,
                 )
@@ -505,6 +604,273 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertIn("runner.max_steps=1000", plan["stages"][4]["command"])
         self.assertIn("actor.model.model_type=pi0", plan["stages"][4]["command"])
 
+    def test_rlinf_vla_plan_accepts_frontend_source_contracts(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "modelFamily": "pi0",
+                        "datasetSource": {
+                            "sourceType": "platform_dataset",
+                            "datasetId": "so101-session-001",
+                            "uri": "s3://evo-studio/private/pearl/so101-session-001",
+                            "format": "lerobot",
+                        },
+                        "modelSource": {
+                            "sourceType": "evo_studio_checkpoint",
+                            "modelFamily": "pi0",
+                            "checkpoint": "s3://evo-studio/checkpoints/pi0/run-001",
+                            "format": "safetensors",
+                        },
+                        "maxSteps": 1000,
+                        "evalEpisodes": 2,
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        plan = response["plan"]
+        self.assertEqual(plan["missingFields"], [])
+        self.assertTrue(plan["datasetPath"].startswith("/root/autodl-tmp/evo_studio/cache/datasets/"))
+        self.assertTrue(plan["checkpointPath"].startswith("/root/autodl-tmp/evo_studio/cache/models/"))
+        self.assertEqual(plan["params"]["datasetSourceKind"], "platform_dataset")
+        self.assertEqual(plan["params"]["modelSourceKind"], "evo_studio_checkpoint")
+        self.assertEqual(plan["params"]["sourceContract"]["datasetFormat"], "lerobot")
+        self.assertEqual(plan["params"]["sourceContract"]["checkpointFormat"], "safetensors")
+        self.assertEqual(plan["params"]["sourceResolutions"]["dataset"]["originalUri"], "s3://evo-studio/private/pearl/so101-session-001")
+        self.assertEqual(plan["params"]["sourceResolutions"]["model"]["originalUri"], "s3://evo-studio/checkpoints/pi0/run-001")
+        self.assertIn("resolve_sources", [stage["name"] for stage in plan["stages"]])
+        self.assertTrue(any("aws s3 sync" in stage["command"] for stage in plan["stages"]))
+        self.assertTrue(any("datasetSource" in stage["command"] for stage in plan["stages"]))
+        self.assertTrue(any("modelSource" in stage["command"] for stage in plan["stages"]))
+
+    def test_rlinf_vla_object_storage_source_requires_auth_ref(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "datasetSource": {
+                            "sourceType": "user_object_storage",
+                            "uri": "s3://my-private-bucket/datasets/demo",
+                        },
+                        "modelSource": {
+                            "sourceType": "builtin_policy",
+                            "modelFamily": "pi0",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertIn("datasetSource.authRef", response["plan"]["missingFields"])
+        self.assertTrue(
+            any("authRef" in warning for warning in response["plan"]["warnings"]),
+            response["plan"]["warnings"],
+        )
+
+    def test_rlinf_vla_public_huggingface_source_stages_with_snapshot_download(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "datasetSource": {
+                            "sourceType": "public_reference",
+                            "uri": "https://huggingface.co/datasets/HuggingFaceVLA/libero",
+                        },
+                        "modelSource": {
+                            "sourceType": "builtin_policy",
+                            "modelFamily": "smolvla",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertTrue(response["plan"]["datasetPath"].startswith("/root/autodl-tmp/evo_studio/cache/datasets/"))
+        self.assertEqual(
+            response["plan"]["params"]["sourceResolutions"]["dataset"]["kind"],
+            "huggingface",
+        )
+        self.assertTrue(any("snapshot_download" in stage["command"] for stage in response["plan"]["stages"]))
+
+    def test_rlinf_vla_private_huggingface_source_uses_auth_ref_env(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "datasetSource": {
+                            "sourceType": "user_object_storage",
+                            "uri": "hf://private-org/private-dataset",
+                            "authRef": "hf-private-data",
+                        },
+                        "modelSource": {
+                            "sourceType": "builtin_policy",
+                            "modelFamily": "smolvla",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertEqual(response["plan"]["missingFields"], [])
+        resolve_stage = next(stage for stage in response["plan"]["stages"] if stage["name"] == "resolve_sources")
+        self.assertIn("EVO_AUTH_HF_PRIVATE_DATA_HF_TOKEN", resolve_stage["command"])
+        self.assertIn("HF_TOKEN", resolve_stage["command"])
+        self.assertNotIn("hf-private-token", resolve_stage["command"])
+
+    def test_rlinf_vla_cloud_drive_source_requests_connector(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "datasetSource": {
+                            "sourceType": "public_reference",
+                            "uri": "https://drive.google.com/file/d/demo/view",
+                        },
+                        "modelSource": {
+                            "sourceType": "builtin_policy",
+                            "modelFamily": "pi0",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertIn("datasetSource.authRef", response["plan"]["missingFields"])
+        self.assertEqual(response["plan"]["params"]["sourceResolutions"]["dataset"]["strategy"], "manual_connector")
+        self.assertTrue(any("connector" in warning for warning in response["plan"]["warnings"]))
+
+    def test_rlinf_vla_builtin_benchmark_does_not_require_dataset_path(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "modelFamily": "pi0",
+                        "datasetSource": {
+                            "sourceType": "builtin_benchmark",
+                            "benchmark": "libero",
+                            "suite": "libero_object",
+                        },
+                        "modelSource": {
+                            "sourceType": "builtin_policy",
+                            "modelFamily": "pi0",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertNotIn("datasetPath", response["plan"]["missingFields"])
+        self.assertFalse(any("datasetPath is empty" in warning for warning in response["plan"]["warnings"]))
+        self.assertEqual(response["plan"]["params"]["datasetSourceKind"], "builtin_benchmark")
+        self.assertEqual(response["plan"]["params"]["suite"], "libero_object")
+
+    def test_rlinf_vla_builtin_policy_resolves_catalog_checkpoint(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "libero_pi0_grpo_smoke",
+                        "datasetPath": "/root/autodl-tmp/datasets/libero",
+                        "modelSource": {
+                            "sourceType": "builtin_policy",
+                            "modelFamily": "pi0",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertTrue(response["plan"]["checkpointPath"].startswith("/root/autodl-tmp/evo_studio/cache/models/"))
+        self.assertEqual(response["plan"]["params"]["resolvedModelSource"]["provider"], "openpi")
+        self.assertEqual(response["plan"]["params"]["checkpointFormat"], "openpi_checkpoint")
+        self.assertEqual(
+            response["plan"]["params"]["sourceResolutions"]["model"]["originalUri"],
+            "gs://openpi-assets/checkpoints/pi0_base",
+        )
+        self.assertTrue(any("gsutil" in stage["command"] for stage in response["plan"]["stages"]))
+
+    def test_rlinf_vla_template_policy_warns_without_default_checkpoint(self) -> None:
+        response = server_function.handle_request(
+            json.dumps(
+                {
+                    "username": "pearl",
+                    "action": "AI配置训练",
+                    "workflow": "rlinf_vla",
+                    "provider": "autodl",
+                    "params": {
+                        "repoUrl": "https://github.com/RLinf/RLinf.git",
+                        "configName": "act_smoke",
+                        "datasetPath": "/root/autodl-tmp/datasets/act",
+                        "modelSource": {
+                            "sourceType": "builtin_policy",
+                            "modelFamily": "act",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(response["message"], "plan generated")
+        self.assertIn("training template", " ".join(response["plan"]["warnings"]))
+        self.assertEqual(response["plan"]["params"]["resolvedModelSource"]["kind"], "training_template")
+
     def test_start_training_materializes_rlinf_vla_for_autodl(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 3000)
         submitted_configs: list[dict[str, object]] = []
@@ -532,6 +898,7 @@ class ServerFunctionTests(unittest.TestCase):
                             "maxSteps": 1000,
                             "evalEpisodes": 2,
                         },
+                        "waitForSubmit": True,
                     },
                     ensure_ascii=False,
                 )
@@ -1626,6 +1993,7 @@ class ServerFunctionTests(unittest.TestCase):
                 "artifactCommand": "true",
                 "workdir": "/root/autodl-tmp/project",
             },
+            "waitForSubmit": True,
         }
 
         with (
@@ -1685,6 +2053,7 @@ class ServerFunctionTests(unittest.TestCase):
                 "repoUrl": "https://example.com/repo.git",
                 "trainCommand": "python train.py",
             },
+            "waitForSubmit": True,
         }
 
         with (
