@@ -39,7 +39,7 @@ from train.platform.factory import get_platform, normalize_provider
 from train.workflows import build_training_plan, enrich_params_from_message, materialize_training_request, parse_params
 
 
-TERMINAL_STATUSES = start_train.DONE_STATUSES | start_train.FAILED_STATUSES | {"STOPPED"}
+TERMINAL_STATUSES = start_train.DONE_STATUSES | start_train.FAILED_STATUSES | {"Stopped"}
 TERMINAL_INSTANCE_STATUSES = {
     "Instance:stopped",
     "Instance:stopping",
@@ -66,11 +66,27 @@ USER_ACTIONS = {
     "AutoDL镜像查询",
     "训练运行时匹配",
     "运行时匹配",
+    "健康检查",
+    "health",
 }
 
 RESPONSE_SCHEMA_VERSION = "roboclaw.train.v1"
 IDENTIFIER_PATTERN = re.compile(r"^[\w.@:-]{1,128}$", re.ASCII)
 PATH_FRAGMENT_FORBIDDEN = {"/", "\\", "\x00"}
+STANDARD_STATUS_MAP = {
+    "STOPPED": "Stopped",
+    "stopped": "Stopped",
+    "STOPPING": "Stopping",
+    "SubmitFailed": "Failed",
+    "submit_failed": "Failed",
+    "failed": "Failed",
+    "succeeded": "Succeeded",
+    "success": "Succeeded",
+    "completed": "Succeeded",
+    "running": "Running",
+    "submitted": "Submitted",
+    "submitting": "Submitting",
+}
 
 
 DEFAULT_AUTODL_SKUS = [
@@ -141,7 +157,8 @@ DEFAULT_AUTODL_SKUS = [
 
 
 def _is_terminal_status(status: str) -> bool:
-    return status in TERMINAL_STATUSES or status in TERMINAL_INSTANCE_STATUSES
+    normalized = _standard_status(status)
+    return normalized in TERMINAL_STATUSES or status in TERMINAL_INSTANCE_STATUSES
 
 
 def _request_string(request: dict[str, Any], key: str) -> str:
@@ -169,6 +186,36 @@ def _token_matches(provided: str, expected: str | None) -> bool:
 
 def _request_id(request: dict[str, Any]) -> str:
     return _request_string(request, "requestId") or _request_string(request, "traceId")
+
+
+def _task_id(username: str, task_name: str) -> str:
+    return f"task:{username}:{task_name}"
+
+
+def _standard_status(status: str) -> str:
+    text = str(status or "").strip()
+    return STANDARD_STATUS_MAP.get(text, STANDARD_STATUS_MAP.get(text.lower(), text))
+
+
+def _use_external_billing(request: dict[str, Any]) -> bool:
+    mode = _request_string(request, "billingMode").lower()
+    return mode == "external" or _request_bool(request, "skipInternalBilling")
+
+
+def _tasks_for_response(tasks: list[dict[str, str]], default_username: str = "") -> list[dict[str, str]]:
+    normalized_tasks: list[dict[str, str]] = []
+    for task in tasks:
+        item = dict(task)
+        username = item.get("username", "") or default_username
+        task_name = item.get("taskName", "")
+        remote_job_id = item.get("remoteJobId", "") if "remoteJobId" in item else item.get("jobId", "")
+        stable_task_id = _task_id(username, task_name) if username and task_name else task_name
+        item["taskId"] = stable_task_id
+        item["jobId"] = stable_task_id
+        item["remoteJobId"] = remote_job_id
+        item["status"] = _standard_status(item.get("status", ""))
+        normalized_tasks.append(item)
+    return normalized_tasks
 
 
 def _invalid_identifier(value: str, field_name: str) -> str | None:
@@ -249,6 +296,10 @@ def _finalize_response(response: dict[str, Any], request: dict[str, Any] | None 
     finalized.setdefault("schemaVersion", RESPONSE_SCHEMA_VERSION)
     finalized["errorCode"] = error_code
     finalized["ok"] = bool(finalized.get("ok", error_code is None))
+    if isinstance(finalized.get("tasks"), list):
+        wallet = finalized.get("wallet")
+        default_username = str(wallet.get("username") or "") if isinstance(wallet, dict) else ""
+        finalized["tasks"] = _tasks_for_response(finalized["tasks"], default_username=default_username)
     if request is not None and "requestId" not in finalized:
         request_id = _request_id(request)
         if request_id:
@@ -844,6 +895,7 @@ def _submit_task_background(
     region: str,
     job_config: dict[str, Any],
     hourly_price_cents: int,
+    external_billing: bool = False,
 ) -> None:
     try:
         platform = get_platform(provider, region_id=region)
@@ -858,12 +910,13 @@ def _submit_task_background(
             last_error="",
         )
     except BaseException as exc:
-        sql_refund_frozen_balance(username, task_name, hourly_price_cents, "background submit failed")
+        if not external_billing:
+            sql_refund_frozen_balance(username, task_name, hourly_price_cents, "background submit failed")
         sql_update_user_task(
             username,
             task_name,
-            status="SubmitFailed",
-            billing_status="submit_failed",
+            status="Failed",
+            billing_status="external_failed" if external_billing else "submit_failed",
             last_error=str(exc),
             stopped_at=utc_now_text(),
         )
@@ -877,6 +930,7 @@ def _start_background_submit(
     region: str,
     job_config: dict[str, Any],
     hourly_price_cents: int,
+    external_billing: bool = False,
 ) -> None:
     thread = threading.Thread(
         target=_submit_task_background,
@@ -887,6 +941,7 @@ def _start_background_submit(
             "region": region,
             "job_config": job_config,
             "hourly_price_cents": hourly_price_cents,
+            "external_billing": external_billing,
         },
         name=f"evo-submit-{username}-{task_name}",
         daemon=True,
@@ -916,9 +971,10 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
         return f"unsupported provider: {provider}", sql_get_user_all_task(username)
 
     hourly_price_cents = _hourly_price_cents(provider, request)
-    if hourly_price_cents <= 0:
+    external_billing = _use_external_billing(request)
+    if hourly_price_cents <= 0 and not external_billing:
         return "invalid hourly price", sql_get_user_all_task(username)
-    if not sql_freeze_user_balance(username, task_name, hourly_price_cents, "freeze first training hour"):
+    if not external_billing and not sql_freeze_user_balance(username, task_name, hourly_price_cents, "freeze first training hour"):
         wallet = sql_get_wallet(username)
         return (
             f"insufficient balance: need at least {hourly_price_cents} cents for 1 hour, "
@@ -934,7 +990,8 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
             raise ValueError("missing required field: checkpointPath")
         if not _request_bool(request, "waitForSubmit") and not _request_bool(request, "syncSubmit"):
             if job_config["dry_run"]:
-                sql_refund_frozen_balance(username, task_name, hourly_price_cents, "dry run")
+                if not external_billing:
+                    sql_refund_frozen_balance(username, task_name, hourly_price_cents, "dry run")
                 return "dry run only", sql_get_user_all_task(username)
             created = sql_add_user_task(
                 username,
@@ -946,10 +1003,11 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
                 hourly_price_cents=hourly_price_cents,
                 frozen_until=add_hours_text(utc_now_text(), 1),
                 started_at=utc_now_text(),
-                billing_status="frozen",
+                billing_status="external" if external_billing else "frozen",
             )
             if not created:
-                sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task row create failed")
+                if not external_billing:
+                    sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task row create failed")
                 return "create task failed", sql_get_user_all_task(username)
             _start_background_submit(
                 username=username,
@@ -958,12 +1016,14 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
                 region=_request_optional_string(request, "region") or "cn-hangzhou",
                 job_config=job_config,
                 hourly_price_cents=hourly_price_cents,
+                external_billing=external_billing,
             )
             return "training accepted", sql_get_user_all_task(username)
 
         remote_job_id = platform.submit(job_config)
         if not remote_job_id and job_config["dry_run"]:
-            sql_refund_frozen_balance(username, task_name, hourly_price_cents, "dry run")
+            if not external_billing:
+                sql_refund_frozen_balance(username, task_name, hourly_price_cents, "dry run")
             return "dry run only", sql_get_user_all_task(username)
         if not remote_job_id:
             return "create task failed: missing remote job id", sql_get_user_all_task(username)
@@ -978,17 +1038,20 @@ def _create_task(username: str, task_name: str, request: dict[str, Any]) -> tupl
             hourly_price_cents=hourly_price_cents,
             frozen_until=add_hours_text(utc_now_text(), 1),
             started_at=utc_now_text(),
-            billing_status="frozen",
+            billing_status="external" if external_billing else "frozen",
         )
         if not created:
-            sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task row create failed")
+            if not external_billing:
+                sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task row create failed")
             return "create task failed", sql_get_user_all_task(username)
         return "create task success", sql_get_user_all_task(username)
     except (ValueError, SystemExit) as exc:
-        sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task create failed")
+        if not external_billing:
+            sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task create failed")
         return str(exc), sql_get_user_all_task(username)
     except Exception as exc:
-        sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task create failed")
+        if not external_billing:
+            sql_refund_frozen_balance(username, task_name, hourly_price_cents, "task create failed")
         return f"create task failed: {exc}", sql_get_user_all_task(username)
 
 
@@ -1039,17 +1102,25 @@ def _ensure_next_billing_hour(username: str, task_name: str, env_file: str | Non
         sql_update_user_task(
             username,
             task_name,
-            status="STOPPED",
+            status="Stopped",
             stopped_at=utc_now_text(),
             billing_status="stopped_insufficient_balance",
             last_error="insufficient balance for next training hour",
         )
-        _settle_task_billing(username, task_name, "STOPPED")
+        _settle_task_billing(username, task_name, "Stopped")
 
 
 def _settle_task_billing(username: str, task_name: str, terminal_status: str) -> None:
     task = sql_get_user_task(username, task_name)
     if task is None or task.get("billingStatus") == "settled":
+        return
+    if task.get("billingStatus") in {"external", "external_failed"}:
+        sql_update_user_task(
+            username,
+            task_name,
+            stopped_at=utc_now_text(),
+            billing_status="settled",
+        )
         return
     hourly_price_cents = int(task.get("hourlyPriceCents") or "0")
     if hourly_price_cents <= 0:
@@ -1119,15 +1190,15 @@ def _stop_task(username: str, task_name: str, request: dict[str, Any]) -> tuple[
             region = _request_optional_string(request, "region") or "cn-hangzhou"
             platform = get_platform(provider, region_id=region)
             platform.stop(task["jobId"])
-            _settle_task_billing(username, task_name, "STOPPED")
-            sql_update_user_task(username, task_name, status="STOPPED", last_error="")
+            _settle_task_billing(username, task_name, "Stopped")
+            sql_update_user_task(username, task_name, status="Stopped", last_error="")
             return "stop task success", sql_get_user_all_task(username)
         except (SystemExit, Exception) as exc:
             sql_update_user_task(username, task_name, last_error=str(exc))
             return f"stop task failed: {exc}", sql_get_user_all_task(username)
 
-    _settle_task_billing(username, task_name, "STOPPED")
-    updated = sql_update_user_task(username, task_name, status="STOPPED")
+    _settle_task_billing(username, task_name, "Stopped")
+    updated = sql_update_user_task(username, task_name, status="Stopped")
     return ("stop task success" if updated else "stop task failed"), sql_get_user_all_task(username)
 
 
@@ -1358,8 +1429,18 @@ def _with_wallet(username: str, message: str, tasks: list[dict[str, str]]) -> di
     return {
         "message": message,
         "wallet": sql_get_wallet(username),
-        "tasks": tasks,
+        "tasks": _tasks_for_response(tasks, default_username=username),
     }
+
+
+def _health_response(request: dict[str, Any]) -> dict[str, Any]:
+    return _response(
+        "ok",
+        request=request,
+        service="EVO_Train",
+        schemaVersion=RESPONSE_SCHEMA_VERSION,
+        supportedActions=sorted(ADMIN_ACTIONS | USER_ACTIONS | {"价格查询"}),
+    )
 
 
 def handle_request(text: str) -> dict[str, Any]:
@@ -1387,6 +1468,8 @@ def handle_request(text: str) -> dict[str, Any]:
         return _finalize_response(_price_response(request), request)
     if action == "平台余额查询":
         return _finalize_response(_platform_balance_response(request), request)
+    if action in {"健康检查", "health"}:
+        return _health_response(request)
     if action == "GPU规格查询":
         return _finalize_response(_gpu_sku_response(request), request)
     if action == "AutoDL镜像查询":

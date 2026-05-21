@@ -81,6 +81,17 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["requestId"], "req-bad-name")
         self.assertIn("invalid username", response["message"])
 
+    def test_health_action_returns_service_status(self) -> None:
+        response = server_function.handle_request(
+            json.dumps({"requestId": "req-health", "action": "健康检查"}, ensure_ascii=False)
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["requestId"], "req-health")
+        self.assertEqual(response["message"], "ok")
+        self.assertEqual(response["service"], "EVO_Train")
+        self.assertIn("开始训练", response["supportedActions"])
+
     def test_start_training_submits_aliyun_job_and_persists_metadata(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 2000)
         request = json.dumps(
@@ -111,7 +122,9 @@ class ServerFunctionTests(unittest.TestCase):
         task = response["tasks"][0]
         self.assertEqual(task["taskName"], "run-001")
         self.assertEqual(task["provider"], "aliyun")
-        self.assertEqual(task["jobId"], "job-123")
+        self.assertEqual(task["jobId"], "task:pearl:run-001")
+        self.assertEqual(task["taskId"], "task:pearl:run-001")
+        self.assertEqual(task["remoteJobId"], "job-123")
         self.assertEqual(task["checkpointPath"], "/mnt/checkpoints/run-001")
         self.assertEqual(task["datasetPath"], "/mnt/data/demo")
         self.assertEqual(task["status"], "Submitted")
@@ -155,7 +168,8 @@ class ServerFunctionTests(unittest.TestCase):
             self.assertEqual(response["message"], "training accepted")
             self.assertEqual(response["requestId"], "req-async-start")
             self.assertEqual(response["tasks"][0]["status"], "Submitting")
-            self.assertEqual(response["tasks"][0]["jobId"], "")
+            self.assertEqual(response["tasks"][0]["jobId"], "task:pearl:run-async")
+            self.assertEqual(response["tasks"][0]["remoteJobId"], "")
             self.assertTrue(submit_started.wait(timeout=1))
             release_submit.set()
             self.assertTrue(submit_done.wait(timeout=1))
@@ -169,6 +183,41 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task["status"], "Submitted")
         self.assertEqual(task["jobId"], "async-job-1")
+
+    def test_start_training_can_use_external_billing_from_roboclaw(self) -> None:
+        submitted = threading.Event()
+
+        class FastPlatform:
+            def submit(self, job_config: dict[str, object]) -> str:
+                submitted.set()
+                return "external-job-1"
+
+        request = json.dumps(
+            {
+                "username": "pearl",
+                "taskName": "external-billing",
+                "action": "开始训练",
+                "provider": "aliyun",
+                "datasetPath": "/mnt/data/demo",
+                "epochs": 1,
+                "checkpointPath": "/mnt/checkpoints/external-billing",
+                "checkpointFrequency": 1,
+                "gpuCount": 1,
+                "billingMode": "external",
+            },
+            ensure_ascii=False,
+        )
+
+        with patch.object(server_function, "get_platform", return_value=FastPlatform()):
+            response = server_function.handle_request(request)
+            self.assertEqual(response["message"], "training accepted")
+            self.assertEqual(response["tasks"][0]["billingStatus"], "external")
+            self.assertEqual(response["tasks"][0]["jobId"], "task:pearl:external-billing")
+            self.assertTrue(submitted.wait(timeout=1))
+
+        wallet = sql_pack.sql_get_wallet("pearl")
+        self.assertEqual(wallet["balanceCents"], "0")
+        self.assertEqual(wallet["frozenCents"], "0")
 
     def test_wallet_and_billing_actions_expose_user_balance_and_records(self) -> None:
         recharge = server_function.handle_request(
@@ -270,7 +319,8 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(response["message"], "sync success")
         self.assertIn("datasetDir", response)
         self.assertEqual(response["tasks"][0]["status"], "Running")
-        self.assertEqual(response["tasks"][0]["jobId"], "job-234")
+        self.assertEqual(response["tasks"][0]["jobId"], "task:pearl:run-002")
+        self.assertEqual(response["tasks"][0]["remoteJobId"], "job-234")
 
     def test_query_status_refreshes_single_task_for_upstream_compatibility(self) -> None:
         sql_pack.sql_set_user_balance("pearl", 2000)
@@ -365,7 +415,7 @@ class ServerFunctionTests(unittest.TestCase):
             )
 
         self.assertEqual(response["message"], "stop task success")
-        self.assertEqual(response["tasks"][0]["status"], "STOPPED")
+        self.assertEqual(response["tasks"][0]["status"], "Stopped")
         self.assertEqual(response["tasks"][0]["billingStatus"], "settled")
         self.assertEqual(response["tasks"][0]["actualCostCents"], "1000")
         wallet = sql_pack.sql_get_wallet("pearl")
@@ -431,7 +481,8 @@ class ServerFunctionTests(unittest.TestCase):
         mocked_factory.assert_called_once_with("autodl", region_id="cn-hangzhou")
         task = response["tasks"][0]
         self.assertEqual(task["provider"], "autodl")
-        self.assertEqual(task["jobId"], "autodl-job-1")
+        self.assertEqual(task["jobId"], "task:pearl:autodl-run")
+        self.assertEqual(task["remoteJobId"], "autodl-job-1")
         self.assertEqual(task["hourlyPriceCents"], "1200")
         self.assertEqual(response["wallet"]["frozenCents"], "1200")
 
@@ -1613,7 +1664,7 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(stats["checked"], 1)
         self.assertGreaterEqual(mocked_factory.call_count, 1)
         task = sql_pack.sql_get_user_task("pearl", "autodl-run-2")
-        self.assertEqual(task["status"], "STOPPED")
+        self.assertEqual(task["status"], "Stopped")
         self.assertEqual(task["billingStatus"], "settled")
         self.assertEqual(sql_pack.sql_get_wallet("pearl")["balanceCents"], "0")
 
@@ -2391,7 +2442,7 @@ class ServerFunctionTests(unittest.TestCase):
         self.assertEqual(stats["updated"], 1)
         mocked_stop.assert_called_once()
         task = sql_pack.sql_get_user_task("pearl", "run-008")
-        self.assertEqual(task["status"], "STOPPED")
+        self.assertEqual(task["status"], "Stopped")
         self.assertEqual(task["billingStatus"], "settled")
         self.assertEqual(task["actualCostCents"], "1000")
         self.assertEqual(task["error"], "insufficient balance for next training hour")
